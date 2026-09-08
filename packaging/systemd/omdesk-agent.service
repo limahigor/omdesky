@@ -1,0 +1,13 @@
+[Unit]
+Description=Omarchy DeskLink Agent
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omdesk-agent
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

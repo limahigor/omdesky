@@ -1,0 +1,16 @@
+[package]
+name = "omdesk-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+omdesk-core = { path = "../omdesk-core" }
+omdesk-protocol = { path = "../omdesk-protocol" }
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true

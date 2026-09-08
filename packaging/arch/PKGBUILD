@@ -1,0 +1,22 @@
+pkgname=omarchy-desklink
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Omarchy-native remote desktop orchestration over Tailscale'
+arch=('x86_64')
+url='https://github.com/omacom/omarchy'
+license=('MIT')
+depends=('tailscale' 'sunshine' 'moonlight-qt')
+makedepends=('cargo')
+source=()
+sha256sums=()
+
+build() {
+  cargo build --release --locked --workspace
+}
+
+package() {
+  install -Dm755 target/release/omdesk "$pkgdir/usr/bin/omdesk"
+  install -Dm755 target/release/omdesk-agent "$pkgdir/usr/bin/omdesk-agent"
+  install -Dm644 packaging/systemd/omdesk-agent.service "$pkgdir/usr/lib/systemd/user/omdesk-agent.service"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

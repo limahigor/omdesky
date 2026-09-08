@@ -1,0 +1,29 @@
+[package]
+name = "omdesk-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "omdesk-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+omdesk-application = { path = "../omdesk-application" }
+omdesk-core = { path = "../omdesk-core" }
+omdesk-platform = { path = "../omdesk-platform" }
+omdesk-protocol = { path = "../omdesk-protocol" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tower.workspace = true

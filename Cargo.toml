@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/omdesk-core",
+    "crates/omdesk-application",
+    "crates/omdesk-protocol",
+    "crates/omdesk-platform",
+    "crates/omdesk-cli",
+    "crates/omdesk-tui",
+    "crates/omdesk-agent",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = "0.8.9"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+crossterm = "0.29.0"
+futures = "0.3.34"
+rand = "0.10.2"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+time = { version = "0.3.55", features = ["serde", "formatting"] }
+tokio = { version = "1.53.1", features = ["full"] }
+toml = "1.1.5"
+tower = { version = "0.5.3", features = ["util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.26.0", features = ["v4", "serde"] }
