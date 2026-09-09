@@ -34,7 +34,7 @@ use time::OffsetDateTime;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "omdesk", version, about = "Omarchy DeskLink")]
+#[command(name = "omdesk", version, about = "Omarchy Desk")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -551,14 +551,14 @@ async fn session(json: bool) -> Result<()> {
                 println!("null");
                 Ok(())
             } else {
-                anyhow::bail!("no active DeskLink session")
+                anyhow::bail!("no active Omarchy Desk session")
             }
         }
     }
 }
 
 async fn disconnect() -> Result<()> {
-    let value = read_session().context("no active DeskLink session to disconnect")?;
+    let value = read_session().context("no active Omarchy Desk session to disconnect")?;
 
     if let Some(pid) = value["moonlight_pid"].as_i64().filter(|pid| *pid > 0) {
         terminate_process(pid as u32);
@@ -756,7 +756,7 @@ fn moonlight_adapter() -> Arc<MoonlightAdapter> {
 }
 
 fn client_name() -> String {
-    env::var("HOSTNAME").unwrap_or_else(|_| "desklink".to_owned())
+    env::var("HOSTNAME").unwrap_or_else(|_| "omdesk".to_owned())
 }
 
 fn parse_workspace_target(value: &str) -> WorkspaceTarget {

@@ -1,4 +1,4 @@
-pkgname=omarchy-desklink
+pkgname=omarchy-desk
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Omarchy-native remote desktop orchestration over Tailscale'

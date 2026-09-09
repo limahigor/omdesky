@@ -78,7 +78,7 @@ impl Services {
             access: Arc::new(FileAccessStore::new(access_path()?)),
             sunshine_credentials_path: sunshine_credentials_path()?,
             agent_port: config.network.agent_port,
-            client_name: env::var("HOSTNAME").unwrap_or_else(|_| "desklink".to_owned()),
+            client_name: env::var("HOSTNAME").unwrap_or_else(|_| "omdesk".to_owned()),
         })
     }
 
@@ -660,13 +660,13 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let outer = centered_area(frame.area());
     let sections = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Min(14),
         Constraint::Length(3),
     ])
     .split(outer);
 
-    draw_header(frame, sections[0], &theme);
+    draw_header(frame, sections[0], state, &theme);
     draw_content(frame, sections[1], state, &theme);
     draw_footer(frame, sections[2], state, &theme);
 
@@ -691,7 +691,7 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
         Overlay::Menu { selected } => {
             let profile = &state.stream_profile;
             (
-                " Settings ",
+                "󰒓  Settings ",
                 20u16,
                 vec![
                     Line::default(),
@@ -761,7 +761,7 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
             )
         }
         Overlay::CredentialsUser { user } => (
-            " Sunshine credentials ",
+            "󰌾  Sunshine credentials ",
             9,
             vec![
                 Line::default(),
@@ -779,7 +779,7 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
             ],
         ),
         Overlay::CredentialsPass { pass, .. } => (
-            " Sunshine credentials ",
+            "󰌾  Sunshine credentials ",
             9,
             vec![
                 Line::default(),
@@ -823,7 +823,7 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
                 "a allow selected device    d revoke    Esc back",
                 Style::default().fg(color(theme.muted)),
             )));
-            (" Access allowlist ", 14, lines)
+            ("󱅣  Access allowlist ", 14, lines)
         }
     };
 
@@ -1003,23 +1003,76 @@ fn centered_area(area: Rect) -> Rect {
     horizontal[1]
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, theme: &OmarchyTheme) {
-    let title = Line::from(vec![
+fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
+    let mark = color(theme.accent);
+    let screen = color(theme.success);
+    let ready = state
+        .nodes
+        .iter()
+        .filter(|node| !node.is_local && node.status == NodeStatus::Ready)
+        .count();
+    let total = state.nodes.iter().filter(|node| !node.is_local).count();
+
+    let status = if state.loading {
         Span::styled(
-            " DESKLINK ",
-            Style::default()
-                .fg(color(theme.background))
-                .bg(color(theme.accent))
-                .add_modifier(Modifier::BOLD),
-        ),
+            "󰑓  scanning the tailnet…",
+            Style::default().fg(color(theme.warning)),
+        )
+    } else if total == 0 {
         Span::styled(
-            "  Omarchy remote desktop",
-            Style::default().fg(color(theme.foreground)),
-        ),
-    ]);
+            "󰤭  no remote devices yet",
+            Style::default().fg(color(theme.muted)),
+        )
+    } else {
+        Span::styled(
+            format!("󰤨  {ready} of {total} devices ready"),
+            Style::default().fg(color(theme.success)),
+        )
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "┏━━━┓",
+                Style::default().fg(mark).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                "OMARCHY",
+                Style::default().fg(mark).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " DESK",
+                Style::default()
+                    .fg(color(theme.foreground))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("┃ ", Style::default().fg(mark).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "⬢",
+                Style::default().fg(screen).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ┃", Style::default().fg(mark).add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled(
+                "Native remote desktop for Omarchy",
+                Style::default().fg(color(theme.muted)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "┗━━━┛",
+                Style::default().fg(mark).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            status,
+        ]),
+    ];
 
     frame.render_widget(
-        Paragraph::new(title)
+        Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(panel(theme)),
         area,
@@ -1097,7 +1150,7 @@ fn draw_devices(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         frame.render_widget(
             Paragraph::new(empty_state_lines(state, theme))
                 .alignment(Alignment::Center)
-                .block(titled_panel(" Devices ", theme)),
+                .block(titled_panel("󰇄  Devices", theme)),
             area,
         );
         return;
@@ -1109,8 +1162,8 @@ fn draw_devices(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         .map(|node| device_item(node, theme))
         .collect::<Vec<_>>();
     let list = List::new(items)
-        .block(titled_panel(" Devices ", theme))
-        .highlight_symbol("  ▸ ")
+        .block(titled_panel("󰇄  Devices", theme))
+        .highlight_symbol(" ")
         .highlight_style(
             Style::default()
                 .fg(color(theme.foreground))
@@ -1119,11 +1172,46 @@ fn draw_devices(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         );
 
     frame.render_stateful_widget(list, area, &mut state.list);
+    draw_selection_bar(frame, area, state, theme);
+}
+
+const DEVICE_ITEM_HEIGHT: u16 = 4;
+
+fn draw_selection_bar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
+    let Some(selected) = state.list.selected() else {
+        return;
+    };
+    let offset = state.list.offset();
+    if selected < offset {
+        return;
+    }
+
+    let bar_x = area.x + 2;
+    let inner_top = area.y + 1;
+    let inner_bottom = area.y + area.height.saturating_sub(1);
+    let rel = (selected - offset) as u16;
+    let y_start = inner_top + rel * DEVICE_ITEM_HEIGHT;
+
+    let accent = color(theme.accent);
+    let selection = color(theme.selection);
+    let buffer = frame.buffer_mut();
+
+    for row in 0..DEVICE_ITEM_HEIGHT {
+        let y = y_start + row;
+        if y >= inner_bottom {
+            break;
+        }
+        if let Some(cell) = buffer.cell_mut((bar_x, y)) {
+            cell.set_symbol("▌");
+            cell.set_fg(accent);
+            cell.set_bg(selection);
+        }
+    }
 }
 
 fn device_item(node: &DiscoveredNode, theme: &OmarchyTheme) -> ListItem<'static> {
     let name = if node.is_local {
-        format!("{} (This device)", node.name)
+        format!("{}  (this device)", node.name)
     } else {
         node.name.clone()
     };
@@ -1137,24 +1225,65 @@ fn device_item(node: &DiscoveredNode, theme: &OmarchyTheme) -> ListItem<'static>
         .map_or_else(|| "—".to_owned(), |value| format!("{value} ms"));
 
     ListItem::new(vec![
+        Line::default(),
         Line::from(vec![
-            Span::styled("  ● ", status_style(node, theme)),
-            Span::styled(name, Style::default().fg(color(foreground))),
-        ]),
-        Line::from(vec![
-            Span::raw("    "),
             Span::styled(
-                format!("{:<13}", status_label(node.status)),
+                format!("  {}  ", device_glyph(node)),
                 status_style(node, theme),
             ),
             Span::styled(
-                format!("{:<10}", connection_label(node.connection)),
+                name,
+                Style::default()
+                    .fg(color(foreground))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{}  {:<11}", status_icon(node), status_label(node.status)),
+                status_style(node, theme),
+            ),
+            Span::styled(
+                format!("󰅐 {latency:<9}"),
                 Style::default().fg(color(theme.muted)),
             ),
-            Span::styled(latency, Style::default().fg(color(theme.muted))),
+            Span::styled(
+                format!(
+                    "{} {}",
+                    connection_icon(node.connection),
+                    connection_label(node.connection)
+                ),
+                Style::default().fg(color(theme.muted)),
+            ),
         ]),
         Line::default(),
     ])
+}
+
+fn device_glyph(node: &DiscoveredNode) -> &'static str {
+    if node.is_local { "󰋜" } else { "󰍹" }
+}
+
+fn status_icon(node: &DiscoveredNode) -> &'static str {
+    if node.is_local {
+        "󰐾"
+    } else {
+        match node.status {
+            NodeStatus::Ready => "󰄬",
+            NodeStatus::Offline => "󰅖",
+            NodeStatus::AgentUnknown => "󰋗",
+            NodeStatus::Incompatible => "󰀦",
+        }
+    }
+}
+
+fn connection_icon(connection: ConnectionKind) -> &'static str {
+    match connection {
+        ConnectionKind::Direct => "󰌘",
+        ConnectionKind::Relay => "󰑩",
+        ConnectionKind::Unknown => "󰤭",
+    }
 }
 
 fn draw_details(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: &OmarchyTheme) {
@@ -1184,7 +1313,7 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         )));
     }
 
-    let paragraph = Paragraph::new(lines).block(titled_panel(" Overview ", theme));
+    let paragraph = Paragraph::new(lines).block(titled_panel("󰔚  Overview", theme));
     if state.detail_expanded {
         frame.render_widget(paragraph.wrap(ratatui::widgets::Wrap { trim: false }), area);
     } else {
@@ -1208,17 +1337,13 @@ fn detail_lines(
         &node.name,
         width,
         Style::default()
-            .fg(color(if node.is_local {
-                theme.muted
-            } else {
-                theme.accent
-            }))
+            .fg(color(theme.foreground))
             .add_modifier(Modifier::BOLD),
     ));
     lines.extend(styled_wrapped_lines(
         &node.address.to_string(),
         width,
-        Style::default().fg(color(theme.muted)),
+        Style::default().fg(color(theme.foreground)),
     ));
     lines.push(Line::default());
     lines.extend(wrapped_property_lines(
@@ -1351,20 +1476,20 @@ fn property_line(label: &str, value: &str, theme: &OmarchyTheme) -> Line<'static
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
     let mut spans = vec![
         key("↑↓", theme),
-        label(" navigate   ", theme),
+        label("  navigate    ", theme),
         key("r", theme),
-        label(" refresh   ", theme),
+        label("  refresh    ", theme),
     ];
 
     if state.selected_remote().is_some() {
-        spans.extend([key("Enter", theme), label(" connect   ", theme)]);
+        spans.extend([key("󰌑 Enter", theme), label("  connect    ", theme)]);
     }
 
     spans.extend([
         key("s", theme),
-        label(" settings   ", theme),
+        label("  settings    ", theme),
         key("q", theme),
-        label(" quit", theme),
+        label("  quit", theme),
     ]);
 
     frame.render_widget(
@@ -1416,7 +1541,7 @@ fn empty_state_lines(state: &AppState, theme: &OmarchyTheme) -> Vec<Line<'static
         return vec![
             Line::default(),
             Line::from(Span::styled(
-                "Discovering DeskLink devices…",
+                "󰃳  Scanning the tailnet for Omarchy Desk devices…",
                 Style::default().fg(color(theme.accent)),
             )),
         ];
@@ -1426,7 +1551,7 @@ fn empty_state_lines(state: &AppState, theme: &OmarchyTheme) -> Vec<Line<'static
         return vec![
             Line::default(),
             Line::from(Span::styled(
-                "Discovery failed",
+                "󱊦  Discovery failed",
                 Style::default()
                     .fg(color(theme.error))
                     .add_modifier(Modifier::BOLD),
@@ -1443,7 +1568,7 @@ fn empty_state_lines(state: &AppState, theme: &OmarchyTheme) -> Vec<Line<'static
     vec![
         Line::default(),
         Line::from(Span::styled(
-            "No compatible devices found",
+            "󰇄  No compatible devices found",
             Style::default().fg(color(theme.foreground)),
         )),
         Line::from(Span::styled(
@@ -1572,7 +1697,7 @@ mod tests {
         let theme = state.theme.current().clone();
         let lines = empty_state_lines(&state, &theme);
 
-        assert!(lines[1].to_string().contains("Discovering"));
+        assert!(lines[1].to_string().contains("Scanning"));
     }
 
     #[test]

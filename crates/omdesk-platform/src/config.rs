@@ -131,7 +131,7 @@ impl Default for FilesConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            inbox: PathBuf::from("~/Downloads/DeskLink"),
+            inbox: PathBuf::from("~/Downloads/OmarchyDesk"),
         }
     }
 }

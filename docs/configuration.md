@@ -1,6 +1,6 @@
 # Configuration and access control
 
-DeskLink loads optional TOML configuration from:
+Omarchy Desk loads optional TOML configuration from:
 
 - `$XDG_CONFIG_HOME/omdesk/config.toml`, when `XDG_CONFIG_HOME` is set
 - `~/.config/omdesk/config.toml` otherwise
@@ -32,7 +32,7 @@ escape_chord = "CTRL+ALT+SHIFT+Z"
 
 [files]
 enabled = false
-inbox = "~/Downloads/DeskLink"
+inbox = "~/Downloads/OmarchyDesk"
 
 [devices.office]
 alias = "workstation"
@@ -48,7 +48,7 @@ default_workspace = "2"
 
 The terminal UI uses the values under `stream`. CLI `connect` has fixed defaults for width, height, FPS, codec, and audio. It uses `stream.bitrate_mbps` only when `--bitrate` is absent. A bitrate of `0` leaves Moonlight's bitrate unchanged.
 
-A key under `devices` can be used as a command target. Its `alias` is substituted before DeskLink matches a Tailscale peer. `default_display` and `default_workspace` are currently not used.
+A key under `devices` can be used as a command target. Its `alias` is substituted before Omarchy Desk matches a Tailscale peer. `default_display` and `default_workspace` are currently not used.
 
 The current implementation does not consult `general.notifications`, `general.default_input`, `input.escape_chord`, `network.strict_tailnet_only`, or the `files` section. Audio values are parsed but are not translated into Moonlight arguments.
 
@@ -56,13 +56,13 @@ The current implementation does not consult `general.notifications`, `general.de
 
 The agent selects the first IPv4 Tailscale address reported for the local node, or the first available Tailscale address when no IPv4 address is present. It listens on that address and `network.agent_port`.
 
-DeskLink control requests use plain HTTP over the Tailnet. DeskLink does not add TLS or bearer tokens to this connection. Tailscale provides the network path and source identity, and Tailscale Grants determine which peers can reach the listener.
+Omarchy Desk control requests use plain HTTP over the Tailnet. Omarchy Desk does not add TLS or bearer tokens to this connection. Tailscale provides the network path and source identity, and Tailscale Grants determine which peers can reach the listener.
 
 `GET /v1/health` is unauthenticated and returns only agent status, protocol version, and agent version. For every other endpoint, the agent passes the TCP source address to `tailscale whois --json` and rejects callers that do not resolve to a Tailscale stable node ID.
 
 ## Access allowlist
 
-By default, an empty DeskLink allowlist accepts any caller that Tailscale identifies and permits to reach the agent. To restrict agent requests further, add controller identities on the controlled host:
+By default, an empty Omarchy Desk allowlist accepts any caller that Tailscale identifies and permits to reach the agent. To restrict agent requests further, add controller identities on the controlled host:
 
 ```bash
 omdesk access allow controller-hostname
@@ -93,12 +93,12 @@ Access-list commands modify the local machine's file. Run them on each controlle
 
 ## Other stored data
 
-The agent creates a DeskLink node UUID in:
+The agent creates a Omarchy Desk node UUID in:
 
 - `$XDG_STATE_HOME/omdesk/identity/node.json`, or
 - `~/.local/state/omdesk/identity/node.json`
 
-This UUID identifies the DeskLink installation in node metadata. It is not an authentication credential.
+This UUID identifies the Omarchy Desk installation in node metadata. It is not an authentication credential.
 
 Sunshine credentials are stored in:
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy DeskLink Agent
+Description=Omarchy Desk Agent
 After=graphical-session.target
 PartOf=graphical-session.target
 

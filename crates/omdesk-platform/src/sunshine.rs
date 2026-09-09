@@ -14,7 +14,7 @@ use omdesk_application::ports::RemoteOmarchy;
 pub const DEFAULT_API_BASE: &str = "https://127.0.0.1:47990";
 pub const DESKTOP_APPLICATION: &str = "Desktop";
 
-/// DeskLink-owned credentials for Sunshine's local admin API. Stored with
+/// Omarchy Desk-owned credentials for Sunshine's local admin API. Stored with
 /// `0600` on the controlled node and never transmitted off it.
 #[derive(Clone)]
 pub struct SunshineCredentials {
@@ -42,7 +42,7 @@ impl SunshineCredentials {
     }
 }
 
-/// Persist DeskLink-owned Sunshine admin credentials with `0600`. Shared by the
+/// Persist Omarchy Desk-owned Sunshine admin credentials with `0600`. Shared by the
 /// CLI (`omdesk setup`) and the TUI settings screen so both configure the same
 /// file identically.
 pub fn store_credentials(

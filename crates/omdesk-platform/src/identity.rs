@@ -3,7 +3,7 @@ use omdesk_core::NodeId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// A stable, local DeskLink node identifier. It is used only for launcher and
+/// A stable, local Omarchy Desk node identifier. It is used only for launcher and
 /// configuration bookkeeping. The control-plane trust anchor is the Tailscale
 /// identity, so this carries no cryptographic key material.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

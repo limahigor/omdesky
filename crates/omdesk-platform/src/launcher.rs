@@ -15,7 +15,7 @@ impl DesktopLauncherStore {
 
     pub fn render(spec: &LauncherSpec) -> String {
         format!(
-            "[Desktop Entry]\nName={}\nComment=Remote Omarchy Desktop\nExec=uwsm app -- omdesk connect {}\nIcon=computer\nTerminal=false\nType=Application\nCategories=Network;RemoteAccess;\nX-DeskLink-NodeId={}\n",
+            "[Desktop Entry]\nName={}\nComment=Remote Omarchy Desktop\nExec=uwsm app -- omdesk connect {}\nIcon=computer\nTerminal=false\nType=Application\nCategories=Network;RemoteAccess;\nX-OmarchyDesk-NodeId={}\n",
             escape_value(&spec.display_name),
             spec.node_id,
             spec.node_id

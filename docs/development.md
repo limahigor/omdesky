@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-DeskLink is a Rust 2024 workspace with a minimum supported Rust version of 1.88. Install a Rust toolchain with Cargo, rustfmt, and Clippy.
+Omarchy Desk is a Rust 2024 workspace with a minimum supported Rust version of 1.88. Install a Rust toolchain with Cargo, rustfmt, and Clippy.
 
 Most unit tests do not require a running Omarchy desktop. Testing runtime behavior requires Omarchy 4, Hyprland, Tailscale, Sunshine, Moonlight Qt, and a user systemd session.
 

@@ -159,7 +159,9 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
 }
 
 fn notify(message: &str) -> String {
-    format!("hl.dispatch(hl.dsp.exec_cmd(\"omarchy-notification-send DeskLink '{message}'\"))")
+    format!(
+        "hl.dispatch(hl.dsp.exec_cmd(\"omarchy-notification-send 'Omarchy Desk' '{message}'\"))"
+    )
 }
 
 fn controller_action_lua(bind: &Keybind) -> Option<String> {
@@ -174,8 +176,8 @@ fn remote_action_lua(bind: &Keybind, controller: &AgentEndpoint) -> Option<Strin
     let shell = format!(
         "log=\\\"${{XDG_RUNTIME_DIR:-/tmp}}/omdesk-keybind.log\\\"; \
 {invocation} >\\\"$log\\\" 2>&1 && \
-omarchy-notification-send DeskLink '{ok}' || \
-omarchy-notification-send DeskLink \\\"DeskLink failed: $(cat \\\"$log\\\")\\\"",
+omarchy-notification-send 'Omarchy Desk' '{ok}' || \
+omarchy-notification-send 'Omarchy Desk' \\\"Omarchy Desk failed: $(cat \\\"$log\\\")\\\"",
         ok = bind.description,
     );
 
@@ -210,7 +212,7 @@ fn install_session_keybinds_spec(
 
         lua.push_str(&format!(
             "; table.insert({BINDS_GLOBAL}, hl.bind(\"{trigger}\", {action}, \
-{{ allow_input_capture = {capture}, description = \"DeskLink: {description}\" }}))",
+{{ allow_input_capture = {capture}, description = \"Omarchy Desk: {description}\" }}))",
             trigger = bind.trigger,
             description = bind.description,
             capture = bind.allow_input_capture,
@@ -250,7 +252,7 @@ mod tests {
         assert!(spec.args[1].contains("hl.dsp.send_shortcut"));
         assert!(spec.args[1].contains("class:com.moonlight_stream.Moonlight"));
         assert!(!spec.args[1].contains("omdesk command"));
-        assert!(spec.args[1].contains("omarchy-notification-send DeskLink"));
+        assert!(spec.args[1].contains("omarchy-notification-send 'Omarchy Desk'"));
     }
 
     #[test]
@@ -274,8 +276,8 @@ mod tests {
         assert!(spec.args[1].contains("omdesk command send-shortcut 100.64.0.7 --port 8765"));
         assert!(spec.args[1].contains("--mods 'CTRL ALT SHIFT' --key Z"));
         assert!(spec.args[1].contains("--window-class com.moonlight_stream.Moonlight"));
-        assert!(spec.args[1].contains("&& omarchy-notification-send DeskLink"));
-        assert!(spec.args[1].contains("|| omarchy-notification-send DeskLink"));
+        assert!(spec.args[1].contains("&& omarchy-notification-send 'Omarchy Desk'"));
+        assert!(spec.args[1].contains("|| omarchy-notification-send 'Omarchy Desk'"));
         assert!(spec.args[1].contains("${XDG_RUNTIME_DIR:-/tmp}/omdesk-keybind.log"));
     }
 
@@ -296,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_clears_only_desklink_bindings() {
+    fn test_remove_clears_only_omdesk_bindings() {
         let spec = remove_session_keybinds_spec();
 
         assert!(spec.args[1].contains("omdesk_binds"));

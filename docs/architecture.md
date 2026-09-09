@@ -1,6 +1,6 @@
 # Architecture
 
-DeskLink separates control from streaming. The controller uses the agent to inspect and prepare a remote Omarchy session, then launches Moonlight directly against Sunshine. The agent is not in the stream path.
+Omarchy Desk separates control from streaming. The controller uses the agent to inspect and prepare a remote Omarchy session, then launches Moonlight directly against Sunshine. The agent is not in the stream path.
 
 ```text
 Control:
@@ -21,7 +21,7 @@ The controller program provides the command-line interface and terminal UI. It r
 The agent runs as the logged-in desktop user on the controlled host. At startup it:
 
 1. verifies that Omarchy major version 4 is installed;
-2. loads or creates a persistent DeskLink node UUID;
+2. loads or creates a persistent Omarchy Desk node UUID;
 3. obtains the local Tailscale address;
 4. binds the control API to that address and the configured port.
 
@@ -43,15 +43,15 @@ Workspace and window operations are narrow Hyprland actions. The agent executes 
 
 ## Pairing flow
 
-DeskLink coordinates the existing Moonlight and Sunshine pairing process:
+Omarchy Desk coordinates the existing Moonlight and Sunshine pairing process:
 
 1. the controller starts `moonlight pair HOST`;
-2. DeskLink reads a four-digit PIN from Moonlight's standard output;
+2. Omarchy Desk reads a four-digit PIN from Moonlight's standard output;
 3. the controller sends the PIN and client name to the remote agent;
 4. the agent submits them to Sunshine's local HTTPS API at `127.0.0.1:47990` using credentials stored on that host;
 5. the controller asks Moonlight for the host's pairing state again.
 
-Sunshine credentials stay on the controlled host and are not included in the DeskLink API. Moonlight and Sunshine retain ownership of the pairing protocol and stream connection.
+Sunshine credentials stay on the controlled host and are not included in the Omarchy Desk API. Moonlight and Sunshine retain ownership of the pairing protocol and stream connection.
 
 ## Network and authorization
 
@@ -59,7 +59,7 @@ The agent control API uses HTTP on the host's Tailscale address. The health endp
 
 An empty local allowlist accepts any source with a Tailscale stable node ID, subject to Tailscale network policy. A nonempty allowlist adds an exact stable-node-ID check. See [Configuration and access control](configuration.md) for operational details.
 
-Sunshine exposes a separate local HTTPS API. DeskLink accepts Sunshine's self-signed certificate because requests are made only to the hard-coded loopback endpoint.
+Sunshine exposes a separate local HTTPS API. Omarchy Desk accepts Sunshine's self-signed certificate because requests are made only to the hard-coded loopback endpoint.
 
 ## Workspace layout
 

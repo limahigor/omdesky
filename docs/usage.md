@@ -1,6 +1,6 @@
 # User guide
 
-DeskLink uses two programs:
+Omarchy Desk uses two programs:
 
 - `omdesk-agent` runs as the desktop user on a machine that will be controlled.
 - `omdesk` discovers agents, inspects remote desktops, pairs Moonlight with Sunshine, and starts streams.
@@ -9,7 +9,7 @@ A machine may run both programs. The agent listens on its Tailscale address and 
 
 ## Prepare a controlled host
 
-Install and configure Tailscale and Sunshine, and make sure the graphical Hyprland session is running. DeskLink requires Omarchy major version 4.
+Install and configure Tailscale and Sunshine, and make sure the graphical Hyprland session is running. Omarchy Desk requires Omarchy major version 4.
 
 Run setup as the desktop user:
 
@@ -17,7 +17,7 @@ Run setup as the desktop user:
 omdesk setup
 ```
 
-Setup creates DeskLink's state directories, prompts for the local Sunshine admin username and password if they have not already been stored, and runs environment checks. For noninteractive setup, provide both values:
+Setup creates Omarchy Desk's state directories, prompts for the local Sunshine admin username and password if they have not already been stored, and runs environment checks. For noninteractive setup, provide both values:
 
 ```bash
 OMDESK_SUNSHINE_USERNAME='username' \
@@ -25,7 +25,7 @@ OMDESK_SUNSHINE_PASSWORD='password' \
 omdesk setup
 ```
 
-The credentials are written to `$XDG_CONFIG_HOME/omdesk/sunshine-credentials.json`, or `~/.config/omdesk/sunshine-credentials.json` when `XDG_CONFIG_HOME` is unset. On Unix, DeskLink creates this file with mode `0600`. The agent uses the credentials only to submit pairing PINs to Sunshine's HTTPS API on `127.0.0.1:47990`.
+The credentials are written to `$XDG_CONFIG_HOME/omdesk/sunshine-credentials.json`, or `~/.config/omdesk/sunshine-credentials.json` when `XDG_CONFIG_HOME` is unset. On Unix, Omarchy Desk creates this file with mode `0600`. The agent uses the credentials only to submit pairing PINs to Sunshine's HTTPS API on `127.0.0.1:47990`.
 
 If installed from the Arch package, enable the user service:
 
@@ -55,7 +55,7 @@ This checks the detected Omarchy version, Tailscale identity, Hyprland monitor q
 omdesk devices
 ```
 
-DeskLink reads `tailscale status --json`, probes each peer on the configured agent port, and shows peers running protocol version 1. Add `--all-tailnet` to include peers whose agent is unreachable or incompatible:
+Omarchy Desk reads `tailscale status --json`, probes each peer on the configured agent port, and shows peers running protocol version 1. Add `--all-tailnet` to include peers whose agent is unreachable or incompatible:
 
 ```bash
 omdesk devices --all-tailnet
@@ -85,7 +85,7 @@ Pair Moonlight on the controller with Sunshine on the controlled host:
 omdesk pair workstation
 ```
 
-DeskLink starts `moonlight pair`, reads the four-digit PIN from Moonlight's standard output, and asks the remote agent to submit it to the local Sunshine API. The controlled host must have valid Sunshine credentials stored by `omdesk setup`.
+Omarchy Desk starts `moonlight pair`, reads the four-digit PIN from Moonlight's standard output, and asks the remote agent to submit it to the local Sunshine API. The controlled host must have valid Sunshine credentials stored by `omdesk setup`.
 
 Start a stream:
 
@@ -153,7 +153,7 @@ omdesk launcher list
 omdesk launcher remove NODE_UUID
 ```
 
-The current launcher command requires a DeskLink UUID and generates an `omdesk connect NODE_UUID` command. Target resolution normally matches Tailscale identities and hostnames rather than the DeskLink UUID, so configure that UUID as a device key before relying on the generated launcher.
+The current launcher command requires a Omarchy Desk UUID and generates an `omdesk connect NODE_UUID` command. Target resolution normally matches Tailscale identities and hostnames rather than the Omarchy Desk UUID, so configure that UUID as a device key before relying on the generated launcher.
 
 ## Troubleshooting
 

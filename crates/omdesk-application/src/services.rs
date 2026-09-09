@@ -316,7 +316,7 @@ impl ConnectNode {
             let _ = self
                 .notifications
                 .send(Notification {
-                    summary: "DeskLink".to_owned(),
+                    summary: "Omarchy Desk".to_owned(),
                     body: "Remote shortcuts enabled. Toggle capture with SUPER+R".to_owned(),
                 })
                 .await;
@@ -329,7 +329,7 @@ impl ConnectNode {
             let _ = self
                 .notifications
                 .send(Notification {
-                    summary: "DeskLink".to_owned(),
+                    summary: "Omarchy Desk".to_owned(),
                     body: "Stream ended; local shortcuts restored".to_owned(),
                 })
                 .await;

@@ -1,6 +1,6 @@
-# Omarchy DeskLink
+# Omarchy Desk
 
-Omarchy DeskLink connects one Omarchy desktop to another over a Tailnet. It discovers hosts through Tailscale, reads and focuses Hyprland workspaces and windows, coordinates Moonlight pairing with Sunshine, and launches the Moonlight stream. Video, audio, and input travel directly between Moonlight and Sunshine; the DeskLink agent handles only discovery and control requests.
+Omarchy Desk connects one Omarchy desktop to another over a Tailnet. It discovers hosts through Tailscale, reads and focuses Hyprland workspaces and windows, coordinates Moonlight pairing with Sunshine, and launches the Moonlight stream. Video, audio, and input travel directly between Moonlight and Sunshine; the Omarchy Desk agent handles only discovery and control requests.
 
 Current features include:
 
@@ -13,7 +13,7 @@ Current features include:
 
 ## Requirements
 
-DeskLink currently targets Omarchy 4 on x86-64 Arch Linux. Each host needs Tailscale and Hyprland. A controlled host also needs Sunshine; a controller needs the `moonlight` command from Moonlight Qt.
+Omarchy Desk currently targets Omarchy 4 on x86-64 Arch Linux. Each host needs Tailscale and Hyprland. A controlled host also needs Sunshine; a controller needs the `moonlight` command from Moonlight Qt.
 
 Building requires Rust 1.88 or newer.
 
@@ -55,4 +55,4 @@ Run `omdesk` without a subcommand to open the terminal UI. Run `omdesk --help` o
 
 ## License
 
-DeskLink is licensed under the [MIT License](LICENSE).
+Omarchy Desk is licensed under the [MIT License](LICENSE).
