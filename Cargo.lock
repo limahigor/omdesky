@@ -1222,6 +1222,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1271,6 +1272,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "tracing",
  "uuid",
 ]
 

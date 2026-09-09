@@ -140,6 +140,118 @@ pub struct Display {
     pub focused: bool,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DisplayId(pub String);
+
+impl DisplayId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let value = self.as_str();
+        if value.is_empty() || value.len() > 64 {
+            return Err(DomainError::InvalidDisplayId);
+        }
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            Ok(())
+        } else {
+            Err(DomainError::InvalidDisplayId)
+        }
+    }
+}
+
+impl fmt::Display for DisplayId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl From<&str> for DisplayId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayMode {
+    #[default]
+    FollowFocus,
+}
+
+impl DisplayMode {
+    pub const ALL: [Self; 1] = [Self::FollowFocus];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayMode::FollowFocus => "Follow Focus",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RemoteDesktopTopology {
+    displays: Vec<DisplayId>,
+    focused: Option<DisplayId>,
+}
+
+impl RemoteDesktopTopology {
+    pub fn new(displays: impl IntoIterator<Item = DisplayId>, focused: Option<DisplayId>) -> Self {
+        Self {
+            displays: displays.into_iter().collect(),
+            focused,
+        }
+    }
+
+    pub fn from_displays(displays: &[Display]) -> Self {
+        let focused = displays
+            .iter()
+            .find(|display| display.focused)
+            .map(|display| DisplayId::new(display.id.clone()));
+
+        Self {
+            displays: displays
+                .iter()
+                .map(|display| DisplayId::new(display.id.clone()))
+                .collect(),
+            focused,
+        }
+    }
+
+    pub fn displays(&self) -> &[DisplayId] {
+        &self.displays
+    }
+
+    pub fn focused(&self) -> Option<&DisplayId> {
+        self.focused.as_ref()
+    }
+
+    pub fn contains(&self, display: &DisplayId) -> bool {
+        self.displays.contains(display)
+    }
+
+    pub fn preferred(&self) -> Option<&DisplayId> {
+        self.focused.as_ref().or_else(|| self.displays.first())
+    }
+}
+
+pub fn follow_focus_target(
+    topology: &RemoteDesktopTopology,
+    streamed: &DisplayId,
+) -> Option<DisplayId> {
+    let target = topology.preferred()?;
+    (target != streamed).then(|| target.clone())
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkspaceId(pub i64);
@@ -337,6 +449,9 @@ pub enum RemoteCommand {
     CloseWindow {
         window: WindowSelector,
     },
+    SwitchStreamDisplay {
+        display: DisplayId,
+    },
     AttachSession {
         role: SessionRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -350,6 +465,7 @@ impl RemoteCommand {
         match self {
             RemoteCommand::SendShortcut { .. } => "send_shortcut",
             RemoteCommand::CloseWindow { .. } => "close_window",
+            RemoteCommand::SwitchStreamDisplay { .. } => "switch_stream_display",
             RemoteCommand::AttachSession { .. } => "attach_session",
             RemoteCommand::DetachSession => "detach_session",
         }
@@ -362,6 +478,7 @@ impl RemoteCommand {
                 window.validate()
             }
             RemoteCommand::CloseWindow { window } => window.validate(),
+            RemoteCommand::SwitchStreamDisplay { display } => display.validate(),
             RemoteCommand::AttachSession { role, controller } => match role {
                 SessionRole::Remote => controller
                     .as_ref()
@@ -382,7 +499,9 @@ impl RemoteCommand {
 
     pub fn controller_exclusive(&self) -> bool {
         match self {
-            RemoteCommand::SendShortcut { .. } | RemoteCommand::CloseWindow { .. } => false,
+            RemoteCommand::SendShortcut { .. }
+            | RemoteCommand::CloseWindow { .. }
+            | RemoteCommand::SwitchStreamDisplay { .. } => false,
             RemoteCommand::AttachSession { .. } | RemoteCommand::DetachSession => false,
         }
     }
@@ -522,6 +641,8 @@ pub enum DomainError {
     InvalidWindowSelector,
     #[error("session endpoint requires a controller address and non-zero port")]
     InvalidSessionEndpoint,
+    #[error("display identifier is not a safe monitor token")]
+    InvalidDisplayId,
 }
 
 #[cfg(test)]
@@ -684,5 +805,130 @@ mod tests {
         assert!(command.validate().is_ok());
         assert_eq!(command.kind(), "attach_session");
         assert!(command.is_session_control());
+    }
+
+    #[test]
+    fn test_switch_stream_display_validates_supported_monitor_names() {
+        let command = RemoteCommand::SwitchStreamDisplay {
+            display: DisplayId::from("HDMI-A-1"),
+        };
+        assert!(command.validate().is_ok());
+        assert_eq!(command.kind(), "switch_stream_display");
+        assert!(!command.is_session_control());
+        assert!(!command.controller_exclusive());
+    }
+
+    #[test]
+    fn test_switch_stream_display_rejects_unsafe_monitor_identifiers() {
+        let command = RemoteCommand::SwitchStreamDisplay {
+            display: DisplayId::from("DP-1;rm -rf"),
+        };
+        assert_eq!(command.validate(), Err(DomainError::InvalidDisplayId));
+
+        let empty = RemoteCommand::SwitchStreamDisplay {
+            display: DisplayId::from(""),
+        };
+        assert_eq!(empty.validate(), Err(DomainError::InvalidDisplayId));
+    }
+
+    #[test]
+    fn test_switch_stream_display_serializes_with_display_field() {
+        let command: RemoteCommand =
+            serde_json::from_str(r#"{"action":"switch_stream_display","display":"DP-2"}"#)
+                .expect("valid switch_stream_display");
+
+        assert!(command.validate().is_ok());
+        match command {
+            RemoteCommand::SwitchStreamDisplay { display } => {
+                assert_eq!(display.as_str(), "DP-2");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    fn topology(displays: &[&str], focused: Option<&str>) -> RemoteDesktopTopology {
+        RemoteDesktopTopology::new(
+            displays.iter().map(|id| DisplayId::from(*id)),
+            focused.map(DisplayId::from),
+        )
+    }
+
+    #[test]
+    fn test_display_mode_serializes_as_stable_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&DisplayMode::FollowFocus).expect("serialize"),
+            "\"follow-focus\""
+        );
+        assert_eq!(
+            serde_json::from_str::<DisplayMode>("\"follow-focus\"").expect("deserialize"),
+            DisplayMode::FollowFocus
+        );
+    }
+
+    #[test]
+    fn test_follow_focus_same_display_requests_no_switch() {
+        let topology = topology(&["eDP-1", "DP-2"], Some("eDP-1"));
+
+        assert_eq!(
+            follow_focus_target(&topology, &DisplayId::from("eDP-1")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_follow_focus_switches_to_newly_focused_display() {
+        let topology = topology(&["eDP-1", "DP-2"], Some("DP-2"));
+
+        assert_eq!(
+            follow_focus_target(&topology, &DisplayId::from("eDP-1")),
+            Some(DisplayId::from("DP-2"))
+        );
+    }
+
+    #[test]
+    fn test_follow_focus_falls_back_when_streamed_display_disappears() {
+        let topology = topology(&["eDP-1"], Some("eDP-1"));
+
+        assert_eq!(
+            follow_focus_target(&topology, &DisplayId::from("DP-2")),
+            Some(DisplayId::from("eDP-1"))
+        );
+    }
+
+    #[test]
+    fn test_follow_focus_without_displays_requests_no_switch() {
+        let topology = topology(&[], None);
+
+        assert_eq!(
+            follow_focus_target(&topology, &DisplayId::from("eDP-1")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_topology_from_displays_tracks_focused_monitor() {
+        let displays = [
+            Display {
+                id: "eDP-1".to_owned(),
+                name: "internal".to_owned(),
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60.0,
+                focused: false,
+            },
+            Display {
+                id: "DP-2".to_owned(),
+                name: "external".to_owned(),
+                width: 2560,
+                height: 1440,
+                refresh_hz: 144.0,
+                focused: true,
+            },
+        ];
+
+        let topology = RemoteDesktopTopology::from_displays(&displays);
+
+        assert_eq!(topology.focused(), Some(&DisplayId::from("DP-2")));
+        assert!(topology.contains(&DisplayId::from("eDP-1")));
     }
 }

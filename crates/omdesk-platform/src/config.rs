@@ -1,4 +1,4 @@
-use omdesk_core::{CodecPreference, InputMode};
+use omdesk_core::{CodecPreference, DisplayMode, InputMode};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
@@ -10,6 +10,7 @@ pub struct Config {
     pub general: GeneralConfig,
     pub network: NetworkConfig,
     pub stream: StreamConfig,
+    pub display: DisplayConfig,
     pub input: InputConfig,
     pub files: FilesConfig,
     #[serde(default)]
@@ -104,6 +105,12 @@ impl Default for StreamConfig {
             bitrate_mbps: 0,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayConfig {
+    pub mode: DisplayMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

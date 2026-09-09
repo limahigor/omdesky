@@ -1,6 +1,7 @@
 pub mod access;
 pub mod agent_client;
 pub mod config;
+pub mod display;
 pub mod hyprland;
 pub mod identity;
 pub mod input;

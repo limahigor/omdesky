@@ -5,11 +5,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use omdesk_application::display::FollowFocusRouter;
 use omdesk_application::ports::{
-    AccessStore, AgentClient, AgentEndpoint, CommandExecutor, MeshNetwork, RemoteOmarchy,
-    SessionKeybindConfig, SessionKeybindInstaller, StreamHost,
+    AccessStore, AgentClient, AgentEndpoint, CommandExecutor, MeshNetwork, Notification,
+    NotificationService, RemoteOmarchy, SessionKeybindConfig, SessionKeybindInstaller, StreamHost,
 };
 use omdesk_core::{DomainError, RemoteCommand, SessionRole, Window, WorkspaceId, WorkspaceTarget};
+use omdesk_platform::display::{
+    HyprlandDisplayTopology, MoonlightDisplayController, spawn_focus_signals,
+};
 use omdesk_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
     FocusResponse, FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, PROTOCOL_V1,
@@ -20,8 +24,12 @@ use serde::Deserialize;
 use serde_json::Map;
 use std::{
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
+use tokio::{sync::mpsc, task::JoinHandle};
+
+const FOLLOW_FOCUS_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub struct SessionConfig {
@@ -39,7 +47,56 @@ pub struct AgentState {
     pub commands: Arc<dyn CommandExecutor>,
     pub keybinds: Arc<dyn SessionKeybindInstaller>,
     pub agent_client: Arc<dyn AgentClient>,
+    pub notifications: Arc<dyn NotificationService>,
     pub session: Arc<RwLock<Option<SessionConfig>>>,
+    pub follow_focus: Arc<Mutex<Option<FollowFocusSession>>>,
+    pub agent_port: u16,
+}
+
+pub struct FollowFocusSession {
+    source: JoinHandle<()>,
+    router: JoinHandle<()>,
+}
+
+impl FollowFocusSession {
+    fn stop(self) {
+        self.source.abort();
+        self.router.abort();
+    }
+}
+
+fn start_follow_focus(state: &AgentState, controller: AgentEndpoint) {
+    let display_controller = Arc::new(MoonlightDisplayController::new(
+        state.agent_client.clone(),
+        controller,
+        state.desktop.clone(),
+    ));
+    let topology = Arc::new(HyprlandDisplayTopology::new(state.desktop.clone()));
+
+    let (sender, receiver) = mpsc::channel(32);
+    let source = spawn_focus_signals(sender);
+    let router = FollowFocusRouter::new(
+        display_controller,
+        topology,
+        state.notifications.clone(),
+        FOLLOW_FOCUS_DEBOUNCE,
+    );
+    let router = tokio::spawn(router.run(receiver));
+
+    let session = FollowFocusSession { source, router };
+    if let Ok(mut guard) = state.follow_focus.lock()
+        && let Some(previous) = guard.replace(session)
+    {
+        previous.stop();
+    }
+}
+
+fn stop_follow_focus(state: &AgentState) {
+    if let Ok(mut guard) = state.follow_focus.lock()
+        && let Some(session) = guard.take()
+    {
+        session.stop();
+    }
 }
 
 pub fn router(state: AgentState) -> Router {
@@ -201,10 +258,93 @@ async fn run_command(
             Ok(Json(CommandResponse { executed: true }))
         }
         _ => {
+            if let RemoteCommand::SwitchStreamDisplay { display } = command {
+                let target = display;
+                let remote_endpoint = AgentEndpoint {
+                    address: source.ip(),
+                    port: state.agent_port,
+                };
+
+                tracing::info!(
+                    display_id = %target,
+                    remote = %remote_endpoint.address,
+                    port = remote_endpoint.port,
+                    "controller.switch_display.received"
+                );
+
+                let _ = state
+                    .notifications
+                    .send(Notification {
+                        summary: "Omarchy Desk (debug)".to_owned(),
+                        body: format!(
+                            "switch_display recebido de {} pedindo {}",
+                            remote_endpoint.address, target
+                        ),
+                    })
+                    .await;
+
+                let displays = state.agent_client.displays(&remote_endpoint).await?;
+
+                tracing::debug!(
+                    displays = ?displays.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+                    "controller.switch_display.remote_topology"
+                );
+
+                let shortcut =
+                    omdesk_platform::display::resolve_display_switch_shortcut(&displays, &target)?;
+
+                tracing::info!(?shortcut, "controller.switch_display.dispatch");
+
+                let outcome = state.commands.execute(shortcut).await;
+
+                let body = match &outcome {
+                    Ok(()) => format!("shortcut Moonlight enviado para {target}"),
+                    Err(error) => format!(
+                        "falha ao executar shortcut ({}): {}",
+                        error.code, error.message
+                    ),
+                };
+                let _ = state
+                    .notifications
+                    .send(Notification {
+                        summary: "Omarchy Desk (debug)".to_owned(),
+                        body,
+                    })
+                    .await;
+
+                outcome?;
+
+                tracing::info!("controller.switch_display.dispatched");
+
+                return Ok(Json(CommandResponse { executed: true }));
+            }
+
+            let notification = controller_command_notification(&command);
+
             state.commands.execute(command).await?;
+
+            if let Some(notification) = notification {
+                let _ = state.notifications.send(notification).await;
+            }
+
             Ok(Json(CommandResponse { executed: true }))
         }
     }
+}
+
+fn controller_command_notification(command: &RemoteCommand) -> Option<Notification> {
+    let body = match command {
+        RemoteCommand::SendShortcut { .. } => "toggle remote shortcut capture",
+        RemoteCommand::CloseWindow { .. } => "close remote session",
+        RemoteCommand::SwitchStreamDisplay { .. }
+        | RemoteCommand::AttachSession { .. }
+        | RemoteCommand::DetachSession => return None,
+    };
+
+    Some(Notification {
+        summary: "Omarchy Desk".to_owned(),
+        body: body.to_owned(),
+    })
 }
 
 async fn apply_session_command(state: &AgentState, command: RemoteCommand) -> Result<(), ApiError> {
@@ -222,6 +362,12 @@ async fn apply_session_command(state: &AgentState, command: RemoteCommand) -> Re
                 });
             }
 
+            if role == SessionRole::Remote
+                && let Some(endpoint) = controller.clone()
+            {
+                start_follow_focus(state, endpoint);
+            }
+
             state
                 .keybinds
                 .install(SessionKeybindConfig { role, controller })
@@ -234,6 +380,7 @@ async fn apply_session_command(state: &AgentState, command: RemoteCommand) -> Re
                 *guard = None;
             }
 
+            stop_follow_focus(state);
             state.keybinds.clear().await?;
 
             Ok(())
@@ -395,5 +542,62 @@ impl From<omdesk_application::ports::PortError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.envelope)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omdesk_core::{KeyChord, KeyModifier, WindowSelector};
+
+    #[test]
+    fn test_controller_shortcut_notification_describes_capture_toggle() {
+        let command = RemoteCommand::SendShortcut {
+            chord: KeyChord::new(
+                [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift],
+                "Z",
+            )
+            .expect("valid shortcut"),
+            window: WindowSelector::ActiveWindow,
+        };
+
+        assert_eq!(
+            controller_command_notification(&command),
+            Some(Notification {
+                summary: "Omarchy Desk".to_owned(),
+                body: "toggle remote shortcut capture".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_controller_close_notification_describes_session_close() {
+        let command = RemoteCommand::CloseWindow {
+            window: WindowSelector::ActiveWindow,
+        };
+
+        assert_eq!(
+            controller_command_notification(&command),
+            Some(Notification {
+                summary: "Omarchy Desk".to_owned(),
+                body: "close remote session".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_session_commands_have_no_controller_action_notification() {
+        assert_eq!(
+            controller_command_notification(&RemoteCommand::DetachSession),
+            None
+        );
+    }
+
+    #[test]
+    fn test_display_switch_command_has_no_controller_notification() {
+        let command = RemoteCommand::SwitchStreamDisplay {
+            display: omdesk_core::DisplayId::from("DP-2"),
+        };
+        assert_eq!(controller_command_notification(&command), None);
     }
 }

@@ -8,7 +8,7 @@ use omdesk_platform::{
     hyprland::HyprlandAdapter,
     identity::NodeIdentity,
     input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
-    omarchy::detect_version,
+    omarchy::{OmarchyNotificationAdapter, detect_version},
     process::TokioCommandRunner,
     sunshine::SunshineAdapter,
     tailscale::TailscaleAdapter,
@@ -17,7 +17,7 @@ use omdesk_protocol::NodeInfoResponse;
 use std::{
     env,
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
         Some(sunshine_credentials_path()?),
     ));
 
+    let notifications = Arc::new(OmarchyNotificationAdapter::default());
+
     let access = Arc::new(FileAccessStore::new(access_path()?));
 
     let node = NodeInfoResponse {
@@ -95,7 +97,10 @@ async fn main() -> Result<()> {
         commands,
         keybinds,
         agent_client,
+        notifications,
         session: Arc::new(RwLock::new(None)),
+        follow_focus: Arc::new(Mutex::new(None)),
+        agent_port: config.network.agent_port,
     };
     let listener = tokio::net::TcpListener::bind((address, config.network.agent_port))
         .await

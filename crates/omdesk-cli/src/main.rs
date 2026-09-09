@@ -8,8 +8,8 @@ use omdesk_application::{
     services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream},
 };
 use omdesk_core::{
-    CodecPreference, InputMode, KeyChord, KeyModifier, NodeId, RemoteCommand, StreamProfile,
-    WindowSelector, WorkspaceTarget,
+    CodecPreference, DisplayId, InputMode, KeyChord, KeyModifier, NodeId, RemoteCommand,
+    StreamProfile, WindowSelector, WorkspaceTarget,
 };
 use omdesk_platform::{
     access::FileAccessStore,
@@ -201,6 +201,15 @@ enum CommandAction {
 
         #[arg(long)]
         window_class: Option<String>,
+
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    SwitchDisplay {
+        target: String,
+
+        #[arg(long)]
+        display: String,
 
         #[arg(long)]
         port: Option<u16>,
@@ -805,6 +814,26 @@ async fn remote_command(action: CommandAction) -> Result<()> {
             let window = window_class.map_or(WindowSelector::ActiveWindow, WindowSelector::Class);
 
             let command = RemoteCommand::CloseWindow { window };
+            command.validate().context("invalid command")?;
+
+            agent_client().send_command(&endpoint, command).await?;
+            println!("ok");
+
+            Ok(())
+        }
+        CommandAction::SwitchDisplay {
+            target,
+            display,
+            port,
+        } => {
+            let endpoint = match (target.parse::<IpAddr>(), port) {
+                (Ok(address), Some(port)) => AgentEndpoint { address, port },
+                _ => resolve_endpoint(&target).await?,
+            };
+
+            let command = RemoteCommand::SwitchStreamDisplay {
+                display: DisplayId::new(display),
+            };
             command.validate().context("invalid command")?;
 
             agent_client().send_command(&endpoint, command).await?;

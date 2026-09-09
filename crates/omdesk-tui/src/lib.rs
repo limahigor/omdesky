@@ -6,7 +6,9 @@ use omdesk_application::{
     ports::{AccessStore, AgentEndpoint, AllowedController, MeshNetwork},
     services::{ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode},
 };
-use omdesk_core::{CodecPreference, ConnectionKind, InputMode, NodeStatus, StreamProfile};
+use omdesk_core::{
+    CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, StreamProfile,
+};
 use omdesk_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
@@ -135,6 +137,7 @@ enum MessageKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamSetting {
+    Display,
     Resolution,
     Fps,
     Bitrate,
@@ -143,7 +146,8 @@ enum StreamSetting {
 }
 
 impl StreamSetting {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
+        Self::Display,
         Self::Resolution,
         Self::Fps,
         Self::Bitrate,
@@ -185,6 +189,7 @@ struct AppState {
     sunshine_configured: bool,
     access_entries: Vec<AccessRow>,
     stream_profile: StreamProfile,
+    display_mode: DisplayMode,
     detail_expanded: bool,
     detail_overflow: bool,
     detail_rect: Option<Rect>,
@@ -204,6 +209,7 @@ impl AppState {
             sunshine_configured: false,
             access_entries: Vec::new(),
             stream_profile: StreamProfile::default(),
+            display_mode: DisplayMode::default(),
             detail_expanded: false,
             detail_overflow: false,
             detail_rect: None,
@@ -439,9 +445,9 @@ async fn run_loop(
     let (sender, mut receiver) = mpsc::channel(16);
     state.loading = true;
     state.sunshine_configured = services.sunshine_configured();
-    state.stream_profile = Config::load()
-        .map(|config| stream_profile(&config))
-        .unwrap_or_else(|_| StreamProfile::default());
+    let loaded = Config::load().ok();
+    state.stream_profile = loaded.as_ref().map(stream_profile).unwrap_or_default();
+    state.display_mode = loaded.map(|config| config.display.mode).unwrap_or_default();
     start_refresh(services.discovery.clone(), sender.clone());
 
     loop {
@@ -512,11 +518,11 @@ fn handle_key(
         }
         KeyCode::Char('s') => {
             state.sunshine_configured = services.sunshine_configured();
-            state.stream_profile = Config::load()
-                .map(|config| stream_profile(&config))
-                .unwrap_or_else(|_| StreamProfile::default());
+            let loaded = Config::load().ok();
+            state.stream_profile = loaded.as_ref().map(stream_profile).unwrap_or_default();
+            state.display_mode = loaded.map(|config| config.display.mode).unwrap_or_default();
             state.overlay = Some(Overlay::Menu {
-                selected: StreamSetting::Resolution,
+                selected: StreamSetting::Display,
             });
         }
         KeyCode::Enter => {
@@ -548,12 +554,20 @@ fn handle_overlay_key(
             KeyCode::Down | KeyCode::Char('j') => *selected = selected.next(),
             KeyCode::Up | KeyCode::Char('k') => *selected = selected.previous(),
             KeyCode::Left | KeyCode::Char('h') => {
-                change_stream_setting(&mut state.stream_profile, *selected, -1);
-                save_stream_profile(state);
+                if *selected == StreamSetting::Display {
+                    change_display_mode(state, -1);
+                } else {
+                    change_stream_setting(&mut state.stream_profile, *selected, -1);
+                    save_stream_profile(state);
+                }
             }
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                change_stream_setting(&mut state.stream_profile, *selected, 1);
-                save_stream_profile(state);
+                if *selected == StreamSetting::Display {
+                    change_display_mode(state, 1);
+                } else {
+                    change_stream_setting(&mut state.stream_profile, *selected, 1);
+                    save_stream_profile(state);
+                }
             }
             KeyCode::Char('c') => {
                 state.overlay = Some(Overlay::CredentialsUser {
@@ -692,9 +706,15 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
             let profile = &state.stream_profile;
             (
                 "󰒓  Settings ",
-                20u16,
+                21u16,
                 vec![
                     Line::default(),
+                    settings_line(
+                        "Display",
+                        state.display_mode.label(),
+                        *selected == StreamSetting::Display,
+                        theme,
+                    ),
                     settings_line(
                         "Resolution",
                         &format!("{}x{}", profile.width, profile.height),
@@ -871,8 +891,37 @@ fn save_stream_profile(state: &mut AppState) {
     }
 }
 
+fn change_display_mode(state: &mut AppState, direction: i8) {
+    let current = DisplayMode::ALL
+        .iter()
+        .position(|mode| *mode == state.display_mode)
+        .unwrap_or(0);
+    let selected = cycle_index(current, DisplayMode::ALL.len(), direction);
+    state.display_mode = DisplayMode::ALL[selected];
+    save_display_mode(state);
+}
+
+fn save_display_mode(state: &mut AppState) {
+    let result = Config::load().and_then(|mut config| {
+        config.display.mode = state.display_mode;
+        config.save()
+    });
+
+    match result {
+        Ok(()) => {
+            state.notice = Some("Display mode saved".to_owned());
+            state.error = None;
+        }
+        Err(error) => {
+            state.error = Some(format!("Could not save display mode: {error}"));
+            state.notice = None;
+        }
+    }
+}
+
 fn change_stream_setting(profile: &mut StreamProfile, setting: StreamSetting, direction: i8) {
     match setting {
+        StreamSetting::Display => {}
         StreamSetting::Resolution => {
             const VALUES: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
             let current = VALUES

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use omdesk_core::{
-    ConnectionKind, Display, InputMode, MeshPeer, NodeId, RemoteCommand, SessionRole,
-    StreamProfile, Window, Workspace, WorkspaceTarget,
+    ConnectionKind, Display, DisplayId, InputMode, MeshPeer, NodeId, RemoteCommand,
+    RemoteDesktopTopology, SessionRole, StreamProfile, Window, Workspace, WorkspaceTarget,
 };
 use omdesk_protocol::{
     ActiveWindowResponse, HealthResponse, NodeInfoResponse, SunshinePairRequest,
@@ -249,6 +249,17 @@ pub trait StreamHost: Send + Sync {
 pub trait DesktopEnvironment: Send + Sync {
     async fn active_display(&self) -> PortResult<Option<Display>>;
     async fn set_input_mode(&self, mode: InputMode) -> PortResult<()>;
+}
+
+#[async_trait]
+pub trait StreamDisplayController: Send + Sync {
+    async fn current_display(&self) -> PortResult<DisplayId>;
+    async fn switch_display(&self, display: &DisplayId) -> PortResult<()>;
+}
+
+#[async_trait]
+pub trait DisplayTopologySource: Send + Sync {
+    async fn topology(&self) -> PortResult<RemoteDesktopTopology>;
 }
 
 #[async_trait]

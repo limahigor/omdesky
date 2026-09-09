@@ -114,6 +114,12 @@ fn launch_spec(request: &StreamLaunchRequest) -> CommandSpec {
     let mut spec = CommandSpec::new("moonlight", launch_arguments(request));
     spec.timeout = Duration::from_secs(30);
     spec.capture = CapturePolicy::Discard;
+
+    if request.input_mode == omdesk_core::InputMode::Remote {
+        spec.environment
+            .insert("QT_QPA_PLATFORM".to_owned(), "wayland".to_owned());
+    }
+
     spec
 }
 
@@ -256,12 +262,19 @@ mod tests {
 
     #[test]
     fn test_remote_input_enables_system_key_capture() {
-        let args = launch_arguments(&request(false, InputMode::Remote));
+        let request = request(false, InputMode::Remote);
+        let args = launch_arguments(&request);
         let index = args
             .iter()
             .position(|a| a == "--capture-system-keys")
             .expect("capture flag present");
         assert_eq!(args[index + 1], "always");
+
+        let spec = launch_spec(&request);
+        assert_eq!(
+            spec.environment.get("QT_QPA_PLATFORM").map(String::as_str),
+            Some("wayland")
+        );
     }
 
     #[test]

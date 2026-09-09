@@ -27,6 +27,9 @@ codec = "auto"
 audio = true
 bitrate_mbps = 0
 
+[display]
+mode = "follow-focus"
+
 [input]
 escape_chord = "CTRL+ALT+SHIFT+Z"
 
@@ -47,6 +50,8 @@ default_workspace = "2"
 `network.allow_unsafe_wildcard_bind` disables the agent's built-in check that its selected address resembles a Tailscale address. It does not change the listener to a wildcard address; the agent still binds the address returned by Tailscale.
 
 The terminal UI uses the values under `stream`. CLI `connect` has fixed defaults for width, height, FPS, codec, and audio. It uses `stream.bitrate_mbps` only when `--bitrate` is absent. A bitrate of `0` leaves Moonlight's bitrate unchanged.
+
+`display.mode` selects how the remote session chooses which monitor to stream. It currently accepts only `follow-focus`, which keeps the streamed monitor aligned with the monitor focused on the remote Hyprland session without restarting Moonlight or Sunshine. The value is chosen in the terminal UI settings screen and stored here for future modes.
 
 A key under `devices` can be used as a command target. Its `alias` is substituted before Omarchy Desk matches a Tailscale peer. `default_display` and `default_workspace` are currently not used.
 
