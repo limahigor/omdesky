@@ -62,6 +62,8 @@ impl HyprlandCommandExecutor {
     }
 
     async fn run_hyprland(&self, spec: CommandSpec) -> PortResult<Vec<u8>> {
+        tracing::debug!(program = %spec.program, args = ?spec.args, "hyprland.command.start");
+
         let output = self.runner.run(spec).await.map_err(|error| {
             PortError::new("HYPRLAND_UNAVAILABLE", error.message, error.retryable)
         })?;
@@ -82,11 +84,13 @@ impl HyprlandCommandExecutor {
         Ok(output.stdout)
     }
 
-    async fn eval(&self, dispatcher: String) -> PortResult<()> {
-        let lua = format!("hl.dispatch({dispatcher})");
-        self.run_hyprland(CommandSpec::new("hyprctl", ["eval".to_owned(), lua]))
-            .await
-            .map(|_| ())
+    async fn eval_batch(&self, dispatchers: Vec<String>) -> PortResult<()> {
+        self.run_hyprland(CommandSpec::new(
+            "hyprctl",
+            ["--batch".to_owned(), hyprctl_batch_argument(&dispatchers)],
+        ))
+        .await
+        .map(|_| ())
     }
 
     async fn send_shortcut(&self, chord: &KeyChord, window: &WindowSelector) -> PortResult<()> {
@@ -102,70 +106,19 @@ impl HyprlandCommandExecutor {
                 Some(active_window_address(&output)?)
             }
         };
+        let lua = timed_shortcut_lua(chord, window, previous.as_deref());
 
-        let mut first_error = match window {
-            WindowSelector::ActiveWindow => None,
-            WindowSelector::Class(_) => self
-                .eval(format!(
-                    "hl.dsp.focus({{ window = \"{}\" }})",
-                    window.as_hypr()
-                ))
-                .await
-                .err(),
-        };
-        let mut pressed_modifiers = Vec::new();
-        let mut key_attempted = false;
+        tracing::info!(
+            mods = %chord.modifiers_hypr(),
+            key = %chord.key(),
+            window = %window.as_hypr(),
+            previous = ?previous,
+            "hyprland.shortcut.dispatch"
+        );
 
-        if first_error.is_none() {
-            for modifier in chord.modifiers() {
-                let key = modifier_key(*modifier);
-                let result = self.eval(key_state_dispatcher(key, "down")).await;
-                pressed_modifiers.push(key);
-
-                if let Err(error) = result {
-                    first_error = Some(error);
-                    break;
-                }
-            }
-        }
-
-        if first_error.is_none() {
-            key_attempted = true;
-            if let Err(error) = self.eval(key_state_dispatcher(chord.key(), "down")).await {
-                first_error = Some(error);
-            }
-        }
-
-        if key_attempted
-            && let Err(error) = self.eval(key_state_dispatcher(chord.key(), "up")).await
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-
-        for modifier in pressed_modifiers.into_iter().rev() {
-            if let Err(error) = self.eval(key_state_dispatcher(modifier, "up")).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-
-        if let Some(previous) = previous
-            && let Err(error) = self
-                .eval(format!(
-                    "hl.dsp.focus({{ window = \"address:{previous}\" }})"
-                ))
-                .await
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        self.run_hyprland(CommandSpec::new("hyprctl", ["eval".to_owned(), lua]))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -181,10 +134,10 @@ impl CommandExecutor for HyprlandCommandExecutor {
                 self.send_shortcut(chord, window).await
             }
             RemoteCommand::CloseWindow { .. } => {
-                let dispatcher = command_dispatcher(&command).ok_or_else(|| {
+                let actions = command_actions(&command, &[]).ok_or_else(|| {
                     PortError::new("COMMAND_NOT_EXECUTABLE", "command is not an action", false)
                 })?;
-                self.eval(dispatcher).await
+                self.eval_batch(actions).await
             }
             RemoteCommand::SwitchStreamDisplay { .. }
             | RemoteCommand::AttachSession { .. }
@@ -239,6 +192,82 @@ fn key_state_dispatcher(key: &str, state: &str) -> String {
     format!("hl.dsp.send_key_state({{ mods = \"\", key = \"{key}\", state = \"{state}\" }})")
 }
 
+fn focus_dispatcher(window: &WindowSelector) -> String {
+    format!("hl.dsp.focus({{ window = \"{}\" }})", window.as_hypr())
+}
+
+fn restore_focus_dispatcher(address: &str) -> String {
+    format!("hl.dsp.focus({{ window = \"address:{address}\" }})")
+}
+
+fn timed_shortcut_lua(
+    chord: &KeyChord,
+    window: &WindowSelector,
+    restore_address: Option<&str>,
+) -> String {
+    let focus = match window {
+        WindowSelector::ActiveWindow => String::new(),
+        WindowSelector::Class(_) => format!("hl.dispatch({}); ", focus_dispatcher(window)),
+    };
+
+    if chord.key() == "Z" {
+        let restore = restore_address.map_or_else(String::new, |address| {
+            format!("; hl.dispatch({})", restore_focus_dispatcher(address))
+        });
+
+        return format!(
+            "{focus}hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key = \"{key}\", state = \"down\" }})); \
+hl.timer(function() hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key = \"{key}\", state = \"up\" }})){restore} end, \
+{{ timeout = 50, type = \"oneshot\" }}); return true",
+            mods = chord.modifiers_hypr(),
+            key = chord.key(),
+        );
+    }
+
+    let mut actions = shortcut_key_dispatchers(chord);
+    if let Some(address) = restore_address {
+        actions.push(restore_focus_dispatcher(address));
+    }
+    let last = actions.pop().expect("validated shortcut has key actions");
+    let mut sequence = format!("hl.dispatch({last}); return true");
+
+    for action in actions.into_iter().rev() {
+        sequence = format!(
+            "hl.dispatch({action}); hl.timer(function() {sequence} end, \
+{{ timeout = 25, type = \"oneshot\" }})"
+        );
+    }
+
+    format!("{focus}{sequence}")
+}
+
+fn shortcut_key_dispatchers(chord: &KeyChord) -> Vec<String> {
+    let mut dispatchers = chord
+        .modifiers()
+        .iter()
+        .map(|modifier| key_state_dispatcher(modifier_key(*modifier), "down"))
+        .collect::<Vec<_>>();
+    dispatchers.push(key_state_dispatcher(chord.key(), "down"));
+    dispatchers.push(key_state_dispatcher(chord.key(), "up"));
+    dispatchers.extend(
+        chord
+            .modifiers()
+            .iter()
+            .rev()
+            .map(|modifier| key_state_dispatcher(modifier_key(*modifier), "up")),
+    );
+
+    dispatchers
+}
+
+fn hyprctl_batch_argument(dispatchers: &[String]) -> String {
+    dispatchers
+        .iter()
+        .map(|dispatcher| format!("eval hl.dispatch({dispatcher})"))
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
 pub struct HyprlandSessionKeybinds {
     runner: Arc<dyn CommandRunner>,
 }
@@ -266,18 +295,23 @@ impl SessionKeybindInstaller for HyprlandSessionKeybinds {
     }
 }
 
-fn command_dispatcher(command: &RemoteCommand) -> Option<String> {
+fn command_actions(command: &RemoteCommand, held_modifiers: &[KeyModifier]) -> Option<Vec<String>> {
     match command {
-        RemoteCommand::SendShortcut { chord, window } => Some(format!(
-            "hl.dsp.send_shortcut({{ mods = \"{}\", key = \"{}\", window = \"{}\" }})",
-            chord.modifiers_hypr(),
-            chord.key(),
-            window.as_hypr()
-        )),
-        RemoteCommand::CloseWindow { window } => Some(format!(
+        RemoteCommand::SendShortcut { chord, window } => {
+            let mut actions = vec![focus_dispatcher(window)];
+            actions.extend(
+                held_modifiers
+                    .iter()
+                    .filter(|modifier| !chord.modifiers().contains(modifier))
+                    .map(|modifier| key_state_dispatcher(modifier_key(*modifier), "up")),
+            );
+            actions.extend(shortcut_key_dispatchers(chord));
+            Some(actions)
+        }
+        RemoteCommand::CloseWindow { window } => Some(vec![format!(
             "hl.dsp.window.close({{ window = \"{}\" }})",
             window.as_hypr()
-        )),
+        )]),
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
         | RemoteCommand::DetachSession => None,
@@ -325,12 +359,30 @@ fn notify(message: &str) -> String {
 }
 
 fn controller_action_lua(bind: &Keybind) -> Option<String> {
-    let dispatcher = command_dispatcher(&bind.command)?;
+    let action = match &bind.command {
+        RemoteCommand::SendShortcut { chord, window } => format!(
+            "function() hl.timer(function() hl.dispatch({focus}); \
+hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key = \"{key}\", state = \"down\" }})); \
+hl.timer(function() hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key = \"{key}\", state = \"up\" }})) end, \
+{{ timeout = 50, type = \"oneshot\" }}) end, {{ timeout = 100, type = \"oneshot\" }}) end",
+            focus = focus_dispatcher(window),
+            mods = chord.modifiers_hypr(),
+            key = chord.key(),
+        ),
+        RemoteCommand::CloseWindow { .. } => {
+            let actions = command_actions(&bind.command, &[])?;
+            let batch = hyprctl_batch_argument(&actions);
+            format!(
+                "function() hl.dispatch(hl.dsp.exec_cmd([==[hyprctl --batch '{batch}']==])) end"
+            )
+        }
+        RemoteCommand::SwitchStreamDisplay { .. }
+        | RemoteCommand::AttachSession { .. }
+        | RemoteCommand::DetachSession => return None,
+    };
     let notify = notify(bind.description);
 
-    Some(format!(
-        "function() hl.dispatch({dispatcher}); {notify} end"
-    ))
+    Some(format!("function() ({action})(); {notify} end"))
 }
 
 fn remote_action_lua(bind: &Keybind, controller: &AgentEndpoint) -> Option<String> {
@@ -461,8 +513,21 @@ mod tests {
         assert_eq!(spec.program, "hyprctl");
         assert!(spec.args[1].contains("SUPER + R"));
         assert!(spec.args[1].contains("SUPER + Q"));
-        assert!(spec.args[1].contains("hl.dsp.send_shortcut"));
-        assert!(spec.args[1].contains("class:com.moonlight_stream.Moonlight"));
+        assert!(spec.args[1].contains("hl.timer(function()"));
+        assert!(spec.args[1].contains("timeout = 100"));
+        assert!(
+            spec.args[1]
+                .contains("hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" })")
+        );
+        assert!(spec.args[1].contains(
+            "hl.dsp.send_key_state({ mods = \"CTRL ALT SHIFT\", key = \"Z\", state = \"down\" })"
+        ));
+        assert!(spec.args[1].contains(
+            "hl.dsp.send_key_state({ mods = \"CTRL ALT SHIFT\", key = \"Z\", state = \"up\" })"
+        ));
+        assert!(spec.args[1].contains("timeout = 50"));
+        assert!(!spec.args[1].contains("key = \"Super_L\""));
+        assert!(!spec.args[1].contains("hl.dsp.send_shortcut"));
         assert!(!spec.args[1].contains("omdesk command"));
         assert!(spec.args[1].contains("omarchy-notification-send 'Omarchy Desk'"));
         assert!(spec.args[1].contains("allow_input_capture = false"));
@@ -473,7 +538,7 @@ mod tests {
     fn test_close_session_bind_closes_moonlight_window() {
         let controller_spec = install_session_keybinds_spec(SessionRole::Controller, None);
         assert!(controller_spec.args[1].contains(
-            "hl.dsp.window.close({ window = \"class:com.moonlight_stream.Moonlight\" })"
+            "eval hl.dispatch(hl.dsp.window.close({ window = \"class:com.moonlight_stream.Moonlight\" }))"
         ));
 
         let remote = install_session_keybinds_spec(SessionRole::Remote, Some(&controller()));
@@ -523,13 +588,52 @@ mod tests {
     }
 
     #[test]
-    fn test_command_dispatcher_uses_validated_tokens() {
-        let dispatcher = command_dispatcher(&moonlight_shortcut("Z")).expect("action renders");
+    fn test_command_actions_build_focus_and_key_state_sequence() {
+        let actions = command_actions(&moonlight_shortcut("Z"), &[]).expect("action renders");
 
         assert_eq!(
-            dispatcher,
-            "hl.dsp.send_shortcut({ mods = \"CTRL ALT SHIFT\", key = \"Z\", \
-window = \"class:com.moonlight_stream.Moonlight\" })"
+            actions,
+            vec![
+                "hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" })".to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Control_L\", state = \"down\" })"
+                    .to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Alt_L\", state = \"down\" })"
+                    .to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Shift_L\", state = \"down\" })"
+                    .to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Z\", state = \"down\" })".to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Z\", state = \"up\" })".to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Shift_L\", state = \"up\" })"
+                    .to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Alt_L\", state = \"up\" })"
+                    .to_owned(),
+                "hl.dsp.send_key_state({ mods = \"\", key = \"Control_L\", state = \"up\" })"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_command_actions_release_held_trigger_modifiers_before_chord() {
+        let actions = command_actions(&moonlight_shortcut("Z"), &[KeyModifier::Super])
+            .expect("action renders");
+
+        assert_eq!(
+            actions[0],
+            "hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" })"
+        );
+        assert_eq!(
+            actions[1],
+            "hl.dsp.send_key_state({ mods = \"\", key = \"Super_L\", state = \"up\" })"
+        );
+        assert_eq!(
+            actions[2],
+            "hl.dsp.send_key_state({ mods = \"\", key = \"Control_L\", state = \"down\" })"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.contains("key = \"Super_L\", state = \"down\""))
         );
     }
 
@@ -546,31 +650,64 @@ window = \"class:com.moonlight_stream.Moonlight\" })"
             .expect("shortcut executes");
 
         let calls = runner.calls();
-        assert_eq!(calls.len(), 11);
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].args, ["activewindow", "-j"]);
-        assert_eq!(
-            calls[1].args[1],
-            "hl.dispatch(hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" }))"
+        assert_eq!(calls[1].args[0], "eval");
+        let lua = &calls[1].args[1];
+        assert!(
+            lua.contains("hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" })")
         );
-        assert!(calls[2].args[1].contains("key = \"Control_L\", state = \"down\""));
-        assert!(calls[3].args[1].contains("key = \"Alt_L\", state = \"down\""));
-        assert!(calls[4].args[1].contains("key = \"Shift_L\", state = \"down\""));
-        assert!(calls[5].args[1].contains("key = \"F2\", state = \"down\""));
-        assert!(calls[6].args[1].contains("key = \"F2\", state = \"up\""));
-        assert!(calls[7].args[1].contains("key = \"Shift_L\", state = \"up\""));
-        assert!(calls[8].args[1].contains("key = \"Alt_L\", state = \"up\""));
-        assert!(calls[9].args[1].contains("key = \"Control_L\", state = \"up\""));
-        assert_eq!(calls[9].args[0], "eval");
-        assert!(calls.last().expect("restore call").args[1].contains("address:0xabc123"));
+        let expected = [
+            "key = \"Control_L\", state = \"down\"",
+            "key = \"Alt_L\", state = \"down\"",
+            "key = \"Shift_L\", state = \"down\"",
+            "key = \"F2\", state = \"down\"",
+            "key = \"F2\", state = \"up\"",
+            "key = \"Shift_L\", state = \"up\"",
+            "key = \"Alt_L\", state = \"up\"",
+            "key = \"Control_L\", state = \"up\"",
+            "address:0xabc123",
+        ];
+        let mut previous = 0;
+        for fragment in expected {
+            let position = lua[previous..]
+                .find(fragment)
+                .map(|position| position + previous)
+                .expect("timed sequence contains ordered action");
+            previous = position + fragment.len();
+        }
+        assert_eq!(lua.matches("timeout = 25").count(), 8);
+        assert!(!lua.contains("mods = \"CTRL ALT SHIFT\""));
     }
 
     #[tokio::test]
-    async fn test_shortcut_releases_pressed_keys_and_restores_focus_after_failure() {
+    async fn test_capture_toggle_uses_combined_modifiers_for_moonlight_hotkey() {
+        let runner = Arc::new(ScriptedRunner::new([Ok(output(
+            r#"{"address":"0xabc123"}"#,
+        ))]));
+        let executor = HyprlandCommandExecutor::new(runner.clone());
+
+        executor
+            .execute(moonlight_shortcut("Z"))
+            .await
+            .expect("shortcut executes");
+
+        let calls = runner.calls();
+        let lua = &calls[1].args[1];
+        assert!(lua.contains(
+            "hl.dsp.send_key_state({ mods = \"CTRL ALT SHIFT\", key = \"Z\", state = \"down\" })"
+        ));
+        assert!(lua.contains(
+            "hl.dsp.send_key_state({ mods = \"CTRL ALT SHIFT\", key = \"Z\", state = \"up\" })"
+        ));
+        assert_eq!(lua.matches("timeout = 50").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_shortcut_restores_focus_when_target_focus_fails() {
         let runner = Arc::new(ScriptedRunner::new([
             Ok(output(r#"{"address":"0xabc123"}"#)),
-            Ok(output("")),
-            Ok(output("")),
-            failure("alt down failed"),
+            failure("target focus failed"),
         ]));
         let executor = HyprlandCommandExecutor::new(runner.clone());
 
@@ -579,12 +716,11 @@ window = \"class:com.moonlight_stream.Moonlight\" })"
             .await
             .expect_err("shortcut fails");
 
-        assert_eq!(error.message, "alt down failed");
+        assert_eq!(error.message, "target focus failed");
         let calls = runner.calls();
-        assert_eq!(calls.len(), 7);
-        assert!(calls[4].args[1].contains("key = \"Alt_L\", state = \"up\""));
-        assert!(calls[5].args[1].contains("key = \"Control_L\", state = \"up\""));
-        assert!(calls[6].args[1].contains("address:0xabc123"));
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].args[1].contains("address:0xabc123"));
+        assert!(calls[1].args[1].contains("send_key_state"));
     }
 
     #[tokio::test]
@@ -615,15 +751,17 @@ window = \"class:com.moonlight_stream.Moonlight\" })"
         executor.execute(command).await.expect("shortcut executes");
 
         let calls = runner.calls();
-        assert_eq!(calls.len(), 4);
-        assert!(calls[0].args[1].contains("Control_L"));
-        assert!(calls[1].args[1].contains("key = \"Z\", state = \"down\""));
-        assert!(calls[2].args[1].contains("key = \"Z\", state = \"up\""));
-        assert!(calls[3].args[1].contains("Control_L"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].args[0], "eval");
+        let lua = &calls[0].args[1];
         assert!(
-            calls
-                .iter()
-                .all(|call| !call.args[1].contains("hl.dsp.focus"))
+            lua.contains(
+                "hl.dsp.send_key_state({ mods = \"CTRL\", key = \"Z\", state = \"down\" })"
+            )
         );
+        assert!(
+            lua.contains("hl.dsp.send_key_state({ mods = \"CTRL\", key = \"Z\", state = \"up\" })")
+        );
+        assert!(!lua.contains("hl.dsp.focus"));
     }
 }

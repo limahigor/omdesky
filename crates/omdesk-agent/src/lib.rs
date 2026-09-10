@@ -29,7 +29,7 @@ use std::{
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
-const FOLLOW_FOCUS_DEBOUNCE: Duration = Duration::from_millis(250);
+const FOLLOW_FOCUS_DEBOUNCE: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct SessionConfig {
