@@ -262,6 +262,18 @@ impl ConnectNode {
     }
 
     pub async fn execute(&self, request: ConnectRequest) -> PortResult<i32> {
+        self.execute_with_started(request, || async {}).await
+    }
+
+    pub async fn execute_with_started<F, Fut>(
+        &self,
+        request: ConnectRequest,
+        on_started: F,
+    ) -> PortResult<i32>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let status = self.agent.sunshine_status(&request.endpoint).await?;
 
         if !status.ready {
@@ -339,6 +351,8 @@ impl ConnectNode {
                 }
             }
         }
+
+        on_started().await;
 
         let exit = process.wait().await;
 

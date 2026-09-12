@@ -3,17 +3,20 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use omdesk_application::{
-    ports::{AccessStore, AgentEndpoint, AllowedController, MeshNetwork, PortError},
+    ports::{
+        AccessStore, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork, PortError,
+    },
     services::{ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode},
 };
 use omdesk_core::{
-    CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, StreamProfile,
+    CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, RemoteCommand,
+    StreamProfile, WindowSelector,
 };
 use omdesk_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
     config::{Config, access_path, legacy_sunshine_credentials_path, state_dir},
-    input::HyprlandSessionKeybinds,
+    input::{HyprlandCommandExecutor, HyprlandSessionKeybinds, MOONLIGHT_WINDOW_CLASS},
     moonlight::MoonlightAdapter,
     omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
@@ -53,6 +56,7 @@ struct Services {
     agent: Arc<HttpAgentClient>,
     stream: Arc<MoonlightAdapter>,
     notifications: Arc<OmarchyNotificationAdapter>,
+    desktop: Arc<HyprlandCommandExecutor>,
     access: Arc<FileAccessStore>,
     sunshine_credentials: SunshineCredentialStore,
     agent_port: u16,
@@ -75,8 +79,9 @@ impl Services {
                 config.network.agent_port,
             )),
             agent,
-            stream: Arc::new(MoonlightAdapter::new(runner)),
+            stream: Arc::new(MoonlightAdapter::new(runner.clone())),
             notifications: Arc::new(OmarchyNotificationAdapter::default()),
+            desktop: Arc::new(HyprlandCommandExecutor::new(runner)),
             access: Arc::new(FileAccessStore::new(access_path()?)),
             sunshine_credentials: SunshineCredentialStore::new(Some(
                 legacy_sunshine_credentials_path()?,
@@ -110,6 +115,21 @@ fn theme_path() -> PathBuf {
 enum Activity {
     Idle,
     Connecting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionAction {
+    Start,
+    Focus,
+    Switch,
+}
+
+fn session_action(active_node_id: Option<&str>, selected_node_id: &str) -> SessionAction {
+    match active_node_id {
+        Some(active) if active == selected_node_id => SessionAction::Focus,
+        Some(_) => SessionAction::Switch,
+        None => SessionAction::Start,
+    }
 }
 
 type DiscoveryResult = Result<Vec<DiscoveredNode>, String>;
@@ -171,7 +191,16 @@ impl StreamSetting {
 
 enum AsyncMessage {
     Discovery(DiscoveryResult),
-    Activity(Result<String, String>),
+    SessionStarted {
+        generation: u64,
+        node_id: String,
+        node_name: String,
+    },
+    SessionEnded {
+        generation: u64,
+        result: Result<String, String>,
+    },
+    Focus(Result<String, String>),
     Access(Result<Vec<AccessRow>, String>),
     CredentialStatus(Result<bool, String>),
     CredentialStored(Result<(), String>),
@@ -183,6 +212,9 @@ struct AppState {
     theme: ThemeWatcher,
     loading: bool,
     activity: Activity,
+    active_node_id: Option<String>,
+    pending_node: Option<DiscoveredNode>,
+    session_generation: u64,
     notice: Option<String>,
     error: Option<String>,
     overlay: Option<Overlay>,
@@ -203,6 +235,9 @@ impl AppState {
             theme,
             loading: false,
             activity: Activity::Idle,
+            active_node_id: None,
+            pending_node: None,
+            session_generation: 0,
             notice: None,
             error: None,
             overlay: None,
@@ -292,7 +327,12 @@ fn start_refresh(discovery: Arc<DiscoverNodes>, sender: mpsc::Sender<AsyncMessag
     });
 }
 
-fn start_connect(services: &Services, node: DiscoveredNode, sender: mpsc::Sender<AsyncMessage>) {
+fn start_connect(
+    services: &Services,
+    node: DiscoveredNode,
+    generation: u64,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
     let service = services.connect_service();
     let endpoint = AgentEndpoint {
         address: node.address,
@@ -309,22 +349,49 @@ fn start_connect(services: &Services, node: DiscoveredNode, sender: mpsc::Sender
             .await
             .unwrap_or_else(|_| endpoint.clone());
 
+        let node_id = node.tailnet_node_id.clone();
+        let node_name = node.name.clone();
         let result = service
-            .execute(ConnectRequest {
-                endpoint,
-                controller_endpoint,
-                profile,
-                fullscreen: true,
-                input_mode,
-                focus_workspace: None,
-                focus_window: None,
-                auto_pair: true,
-            })
+            .execute_with_started(
+                ConnectRequest {
+                    endpoint,
+                    controller_endpoint,
+                    profile,
+                    fullscreen: true,
+                    input_mode,
+                    focus_workspace: None,
+                    focus_window: None,
+                    auto_pair: true,
+                },
+                || async {
+                    let _ = sender
+                        .send(AsyncMessage::SessionStarted {
+                            generation,
+                            node_id,
+                            node_name,
+                        })
+                        .await;
+                },
+            )
             .await
             .map(|exit| stream_exit_message(&node.name, exit))
             .map_err(|error| user_error("The connection could not be completed.", &error));
 
-        let _ = sender.send(AsyncMessage::Activity(result)).await;
+        let _ = sender
+            .send(AsyncMessage::SessionEnded { generation, result })
+            .await;
+    });
+}
+
+fn start_focus(desktop: Arc<HyprlandCommandExecutor>, sender: mpsc::Sender<AsyncMessage>) {
+    tokio::spawn(async move {
+        let result = desktop
+            .focus_stream()
+            .await
+            .map(|_| "Focused the active stream.".to_owned())
+            .map_err(|error| user_error("The active stream could not be focused.", &error));
+
+        let _ = sender.send(AsyncMessage::Focus(result)).await;
     });
 }
 
@@ -457,14 +524,31 @@ fn stream_exit_message(node_name: &str, exit: i32) -> String {
 }
 
 fn requires_terminal_reset(message: &AsyncMessage) -> bool {
-    matches!(message, AsyncMessage::Activity(_))
+    matches!(
+        message,
+        AsyncMessage::SessionStarted { .. } | AsyncMessage::SessionEnded { .. }
+    )
 }
 
 fn apply_message(state: &mut AppState, message: AsyncMessage) {
     match message {
         AsyncMessage::Discovery(result) => apply_refresh(state, result),
-        AsyncMessage::Activity(result) => {
+        AsyncMessage::SessionStarted {
+            generation,
+            node_id,
+            node_name,
+        } if generation == state.session_generation => {
             state.activity = Activity::Idle;
+            state.active_node_id = Some(node_id);
+            state.notice = Some(format!("Connected to {node_name}."));
+            state.error = None;
+        }
+        AsyncMessage::SessionStarted { .. } => {}
+        AsyncMessage::SessionEnded { generation, result }
+            if generation == state.session_generation =>
+        {
+            state.activity = Activity::Idle;
+            state.active_node_id = None;
             state.detail_expanded = false;
 
             match result {
@@ -478,6 +562,17 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
                 }
             }
         }
+        AsyncMessage::SessionEnded { .. } => {}
+        AsyncMessage::Focus(result) => match result {
+            Ok(notice) => {
+                state.notice = Some(notice);
+                state.error = None;
+            }
+            Err(error) => {
+                state.error = Some(error);
+                state.notice = None;
+            }
+        },
         AsyncMessage::Access(result) => match result {
             Ok(entries) => state.access_entries = entries,
             Err(error) => {
@@ -547,6 +642,13 @@ async fn run_loop(
             }
         }
 
+        if state.activity == Activity::Idle
+            && state.active_node_id.is_none()
+            && let Some(node) = state.pending_node.take()
+        {
+            begin_connect(state, &services, node, sender.clone());
+        }
+
         terminal.draw(|frame| draw(frame, state))?;
 
         if !event::poll(Duration::from_millis(80))? {
@@ -555,7 +657,7 @@ async fn run_loop(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if handle_key(state, &services, &sender, key) {
+                if handle_key(state, &services, &sender, key).await {
                     return Ok(());
                 }
             }
@@ -576,7 +678,21 @@ fn point_in_rect(column: u16, row: u16, rect: Rect) -> bool {
     column >= rect.x && column < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn handle_key(
+fn begin_connect(
+    state: &mut AppState,
+    services: &Services,
+    node: DiscoveredNode,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
+    state.session_generation = state.session_generation.wrapping_add(1);
+    state.activity = Activity::Connecting;
+    state.active_node_id = None;
+    state.error = None;
+    state.notice = Some(format!("Connecting to {}…", node.name));
+    start_connect(services, node, state.session_generation, sender);
+}
+
+async fn handle_key(
     state: &mut AppState,
     services: &Services,
     sender: &mpsc::Sender<AsyncMessage>,
@@ -584,10 +700,6 @@ fn handle_key(
 ) -> bool {
     if state.overlay.is_some() {
         handle_overlay_key(state, services, sender, key);
-        return false;
-    }
-
-    if state.activity != Activity::Idle {
         return false;
     }
 
@@ -616,10 +728,38 @@ fn handle_key(
                 state.error = Some(reason.to_owned());
                 state.notice = None;
             } else if let Some(node) = state.selected_remote() {
-                state.activity = Activity::Connecting;
-                state.error = None;
-                state.notice = Some(format!("Connecting to {}…", node.name));
-                start_connect(services, node, sender.clone());
+                match session_action(state.active_node_id.as_deref(), &node.tailnet_node_id) {
+                    SessionAction::Focus => {
+                        state.notice = Some(format!("Focusing {}…", node.name));
+                        state.error = None;
+                        start_focus(services.desktop.clone(), sender.clone());
+                    }
+                    SessionAction::Switch => {
+                        state.pending_node = Some(node.clone());
+                        state.notice = Some(format!("Switching to {}…", node.name));
+                        state.error = None;
+
+                        if let Err(error) = services
+                            .desktop
+                            .execute(RemoteCommand::CloseWindow {
+                                window: WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()),
+                            })
+                            .await
+                        {
+                            state.pending_node = None;
+                            state.error = Some(user_error(
+                                "The current stream could not be closed.",
+                                &error,
+                            ));
+                            state.notice = None;
+                        }
+                    }
+                    SessionAction::Start => {
+                        if state.activity == Activity::Idle {
+                            begin_connect(state, services, node, sender.clone());
+                        }
+                    }
+                }
             }
         }
         _ => {}
@@ -1964,10 +2104,19 @@ mod tests {
     }
 
     #[test]
-    fn test_completed_activity_requires_terminal_reset() {
-        let message = AsyncMessage::Activity(Ok("disconnected".to_owned()));
+    fn test_session_lifecycle_requires_terminal_reset() {
+        let started = AsyncMessage::SessionStarted {
+            generation: 1,
+            node_id: "tail-workstation".to_owned(),
+            node_name: "workstation".to_owned(),
+        };
+        let ended = AsyncMessage::SessionEnded {
+            generation: 1,
+            result: Ok("disconnected".to_owned()),
+        };
 
-        assert!(requires_terminal_reset(&message));
+        assert!(requires_terminal_reset(&started));
+        assert!(requires_terminal_reset(&ended));
     }
 
     #[test]
@@ -1992,6 +2141,30 @@ mod tests {
 
         state.select_next();
         assert_eq!(state.list.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_session_action_starts_without_active_session() {
+        assert_eq!(
+            session_action(None, "tail-workstation"),
+            SessionAction::Start
+        );
+    }
+
+    #[test]
+    fn test_session_action_focuses_active_device() {
+        assert_eq!(
+            session_action(Some("tail-workstation"), "tail-workstation"),
+            SessionAction::Focus
+        );
+    }
+
+    #[test]
+    fn test_session_action_switches_to_another_device() {
+        assert_eq!(
+            session_action(Some("tail-workstation"), "tail-notebook"),
+            SessionAction::Switch
+        );
     }
 
     #[test]

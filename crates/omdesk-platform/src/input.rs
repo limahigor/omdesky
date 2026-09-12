@@ -103,6 +103,28 @@ impl HyprlandCommandExecutor {
         .map(|_| ())
     }
 
+    pub async fn focus_window(&self, window: &WindowSelector) -> PortResult<()> {
+        window
+            .validate()
+            .map_err(|error| PortError::new("INVALID_COMMAND", error.to_string(), false))?;
+
+        self.eval_batch(vec![focus_dispatcher(window)]).await
+    }
+
+    pub async fn focus_stream(&self) -> PortResult<()> {
+        let window = WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned());
+        let chord = KeyChord::new(
+            [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift],
+            "Z",
+        )
+        .expect("static Moonlight chord is valid");
+        let lua = timed_shortcut_lua(&chord, &window, None);
+
+        self.run_hyprland(CommandSpec::new("hyprctl", ["eval".to_owned(), lua]))
+            .await
+            .map(|_| ())
+    }
+
     async fn send_shortcut(&self, chord: &KeyChord, window: &WindowSelector) -> PortResult<()> {
         let previous = match window {
             WindowSelector::ActiveWindow => None,
@@ -683,6 +705,49 @@ mod tests {
                 .iter()
                 .any(|action| action.contains("key = \"Super_L\", state = \"down\""))
         );
+    }
+
+    #[tokio::test]
+    async fn test_focus_window_dispatches_only_focus_action() {
+        let runner = Arc::new(ScriptedRunner::new([]));
+        let executor = HyprlandCommandExecutor::new(runner.clone());
+
+        executor
+            .focus_window(&WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()))
+            .await
+            .expect("window focuses");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "hyprctl");
+        assert_eq!(calls[0].args[0], "--batch");
+        assert!(
+            calls[0].args[1]
+                .contains("hl.dsp.focus({ window = \"class:com.moonlight_stream.Moonlight\" })")
+        );
+        assert!(!calls[0].args[1].contains("send_key_state"));
+    }
+
+    #[tokio::test]
+    async fn test_focus_stream_toggles_input_capture_after_focusing() {
+        let runner = Arc::new(ScriptedRunner::new([]));
+        let executor = HyprlandCommandExecutor::new(runner.clone());
+
+        executor
+            .focus_stream()
+            .await
+            .expect("stream focuses and captures input");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        let lua = &calls[0].args[1];
+        let focus = lua.find("hl.dsp.focus").expect("focus action");
+        let toggle = lua
+            .find("key = \"Z\", state = \"down\"")
+            .expect("toggle action");
+        assert!(focus < toggle);
+        assert!(lua.contains("mods = \"CTRL ALT SHIFT\""));
+        assert!(lua.contains("key = \"Z\", state = \"up\""));
     }
 
     #[tokio::test]
