@@ -1,70 +1,112 @@
 # User guide
 
-Omarchy Desk uses two programs:
+This guide uses two names throughout:
 
-- `omdesk-agent` runs as the desktop user on a machine that will be controlled.
-- `omdesk` discovers agents, inspects remote desktops, pairs Moonlight with Sunshine, and starts streams.
+- The **remote computer** is the Omarchy desktop you want to use.
+- The **controller** is the computer in front of you.
 
-A machine may run both programs. The agent listens on its Tailscale address and does not carry the Moonlight stream.
+A computer can serve both roles. Install `omdesk` and `omdesk-agent` on every computer where you want that flexibility.
 
-## Prepare a controlled host
+## Before you begin
 
-Install and configure Tailscale and Sunshine, and make sure the graphical Hyprland session is running. Omarchy Desk requires Omarchy major version 4.
+Connect both computers to the same Tailnet. The remote computer must be running Omarchy 4, Hyprland, Sunshine, and `omdesk-agent`. The controller must have Moonlight Qt installed.
 
-Run setup as the desktop user:
+## Prepare the remote computer
+
+Open a terminal on the remote computer and run:
 
 ```bash
 omdesk setup
 ```
 
-Setup creates Omarchy Desk's state directories, prompts for the local Sunshine admin username and password if they have not already been stored, and runs environment checks. For noninteractive setup, provide both values:
+Enter the username and password you use for Sunshine's web interface. Omarchy Desk stores them in the desktop user's Linux Secret Service collection, not in a plaintext configuration file. The credentials never leave the remote computer. Run setup from an unlocked graphical session so Secret Service is available.
 
-```bash
-OMDESK_SUNSHINE_USERNAME='username' \
-OMDESK_SUNSHINE_PASSWORD='password' \
-omdesk setup
-```
-
-The credentials are written to `$XDG_CONFIG_HOME/omdesk/sunshine-credentials.json`, or `~/.config/omdesk/sunshine-credentials.json` when `XDG_CONFIG_HOME` is unset. On Unix, Omarchy Desk creates this file with mode `0600`. The agent uses the credentials only to submit pairing PINs to Sunshine's HTTPS API on `127.0.0.1:47990`.
-
-If installed from the Arch package, enable the user service:
+Enable the agent:
 
 ```bash
 systemctl --user enable --now omdesk-agent.service
 ```
 
-When running from a source checkout instead:
-
-```bash
-cargo run -p omdesk-agent --bin omdesk-agent
-```
-
-The agent needs access to the graphical session, `hyprctl`, `tailscale`, `sunshine`, and the user's systemd instance.
-
-## Check the local environment
+Check that everything is ready:
 
 ```bash
 omdesk doctor
 ```
 
-This checks the detected Omarchy version, Tailscale identity, Hyprland monitor query, Sunshine readiness, and the local Sunshine credential file. Use `--json` for machine-readable output.
+The report checks Omarchy, Tailscale, Hyprland, Sunshine, and the credentials needed for automatic pairing.
 
-## Find hosts
+If you built the project from source and have not installed the service, start the agent from the repository instead:
+
+```bash
+cargo run -p omdesk-agent --bin omdesk-agent
+```
+
+Keep that process running while you connect.
+
+## Use the terminal interface
+
+On the controller, run:
+
+```bash
+omdesk
+```
+
+Omarchy Desk scans your Tailnet and lists compatible devices. The main keys are:
+
+- `Up`, `Down`, `j`, or `k` to select a device
+- `Enter` to connect
+- `r` to scan again
+- `s` to change stream settings
+- `q` or `Esc` to leave
+
+The settings screen lets you choose the display behavior, resolution, frame rate, bitrate, codec, and audio preference. Changes are saved for future terminal-interface sessions.
+
+## Connect from the command line
+
+List available computers:
 
 ```bash
 omdesk devices
 ```
 
-Omarchy Desk reads `tailscale status --json`, probes each peer on the configured agent port, and shows peers running protocol version 1. Add `--all-tailnet` to include peers whose agent is unreachable or incompatible:
+Start a stream by using the displayed device name:
 
 ```bash
-omdesk devices --all-tailnet
-omdesk devices --json
+omdesk connect workstation
 ```
 
-Commands that accept `TARGET` support a Tailnet IP, online Tailscale hostname, stable Tailscale node ID, DNS-name prefix, or a device name configured in `config.toml`.
+Pairing happens automatically when possible. To pair without opening a stream, run:
 
-## Inspect a host
+```bash
+omdesk pair workstation
+```
+
+Useful connection examples:
+
+```bash
+omdesk connect workstation --windowed
+omdesk connect workstation --width 2560 --height 1440 --fps 120
+omdesk connect workstation --codec hevc --bitrate 30
+omdesk connect workstation --workspace 2
+omdesk connect workstation --input remote
+```
+
+Bitrate is measured in megabits per second. Available codecs are `auto`, `h264`, `hevc`, and `av1`.
+
+## Control shortcuts during a stream
+
+With remote input enabled, system shortcuts are sent to the remote desktop.
+
+- Press `Super+R` to release shortcuts back to the controller.
+- Press `Super+R` again to send shortcuts to the remote desktop.
+- Press `Super+Q` to close the remote session.
+- Use `Ctrl+Alt+Shift+Z` if you need Moonlight's built-in capture toggle.
+
+After capture is released, shortcuts such as `Super+W` affect the local Moonlight window rather than the remote desktop.
+
+## Inspect a remote desktop
+
+The following commands are useful when choosing a monitor, workspace, or application:
 
 ```bash
 omdesk info workstation
@@ -75,121 +117,62 @@ omdesk windows workstation --workspace 2
 omdesk windows workstation --app-id firefox
 ```
 
-`info`, `displays`, `workspaces`, and `windows` accept `--json`. Window filtering uses exact workspace IDs and exact `app_id` or class values.
+Add `--json` when you need structured output for a script.
 
-## Pair and connect
+A target can be a visible Tailscale hostname, Tailnet IP address, stable Tailscale node ID, or a device name from your Omarchy Desk configuration.
 
-Pair Moonlight on the controller with Sunshine on the controlled host:
+## End a command-line session
 
-```bash
-omdesk pair workstation
-```
-
-Omarchy Desk starts `moonlight pair`, reads the four-digit PIN from Moonlight's standard output, and asks the remote agent to submit it to the local Sunshine API. The controlled host must have valid Sunshine credentials stored by `omdesk setup`.
-
-Start a stream:
-
-```bash
-omdesk connect workstation
-```
-
-`connect` checks Sunshine readiness and pairs automatically when necessary. Its default stream is full-screen at 1920x1080 and 60 FPS, with automatic codec selection and local system-key handling.
-
-Common options:
-
-```bash
-omdesk connect workstation --windowed
-omdesk connect workstation --width 2560 --height 1440 --fps 120
-omdesk connect workstation --codec hevc --bitrate 30
-omdesk connect workstation --workspace 2
-omdesk connect workstation --window 0x55c9ab12
-omdesk connect workstation --input remote
-```
-
-Codec values are `auto`, `h264`, `hevc`, and `av1`. Bitrate is specified in megabits per second. `--input remote` tells Moonlight to capture system keys for the remote session. During the stream, press `Super+R` to toggle capture between the remote desktop and the local session: while captured, shortcuts such as `Super+W` act on the remote desktop; after unlocking, they act locally (so `Super+W` closes the Moonlight window). Moonlight's built-in `Ctrl+Alt+Shift+Z` still works as a fallback.
-
-The `--workspace` value may be a numeric Hyprland workspace ID or a name without whitespace. `--window` requires the hexadecimal Hyprland window address shown by the agent API. Use `omdesk windows --json` to inspect window data.
-
-`--no-audio` is accepted by the current CLI but does not change the generated Moonlight command.
-
-## Terminal UI
-
-Run:
-
-```bash
-omdesk
-```
-
-The terminal UI discovers nodes and supports connection, Sunshine credential setup, and access-list management. Streams capture system shortcuts by default, so combinations such as `Super+W` are sent to the remote desktop. Press `Super+R` at any time to toggle capture: once unlocked, `Super+W` closes the local Moonlight window; press `Super+R` again to hand shortcuts back to the remote desktop. Its main keys are:
-
-- `j`, `k`, or the arrow keys to move
-- `Enter` to connect
-- `r` to refresh
-- `s` to open settings
-- `q` or `Esc` to quit
-
-The terminal UI uses stream defaults from `config.toml`. CLI `connect` uses its own command-line defaults, except that the configured bitrate is used when `--bitrate` is omitted.
-
-## Session commands
-
-A CLI connection records temporary session metadata under `$XDG_RUNTIME_DIR/omdesk/current-session.json`.
+A stream started with `omdesk connect` can be inspected or stopped from another terminal:
 
 ```bash
 omdesk session
-omdesk session --json
-omdesk input status
 omdesk disconnect
 ```
 
-`disconnect` signals the supervising `omdesk` process recorded in that file. Terminal UI connections do not create this record. An interrupted CLI process can leave stale metadata.
+The terminal interface manages its own session and does not create a command-line session record.
 
-## Desktop launchers
+## Restrict access
 
-The launcher commands create files in `~/.local/share/applications`:
+Tailscale controls which devices can reach the agent. Omarchy Desk can add a second local restriction on the remote computer:
 
 ```bash
-omdesk launcher create NODE_UUID
-omdesk launcher list
-omdesk launcher remove NODE_UUID
+omdesk access allow controller-hostname
+omdesk access list
+omdesk access revoke controller-hostname
 ```
 
-The current launcher command requires a Omarchy Desk UUID and generates an `omdesk connect NODE_UUID` command. Target resolution normally matches Tailscale identities and hostnames rather than the Omarchy Desk UUID, so configure that UUID as a device key before relying on the generated launcher.
+Once at least one controller is listed, other Tailscale devices are refused. Run these commands on each remote computer you want to protect.
 
 ## Troubleshooting
 
-Start with:
+Start on the computer reporting the problem:
 
 ```bash
 omdesk doctor
 ```
 
-If no hosts appear:
+### No devices appear
 
-- Confirm both machines are connected to Tailscale.
-- Confirm `omdesk-agent.service` is running as the desktop user on the controlled host.
-- Confirm the configured agent port is reachable under your Tailscale Grants.
-- Use `omdesk devices --all-tailnet` to distinguish an unreachable agent from an undiscovered peer.
+- Confirm both computers are connected to Tailscale.
+- Confirm the agent is running on the remote computer with `systemctl --user status omdesk-agent.service`.
+- Run `omdesk devices --all-tailnet` to show computers whose agent cannot be reached.
+- Check that your Tailscale policy allows the controller to reach the configured agent port.
 
-If the agent does not start:
+### Sunshine is not ready
 
-- Check that `pacman -Q omarchy` reports Omarchy 4.
-- Check that `tailscale status --json` returns a local Tailscale address.
-- Check that the user service starts inside the graphical session.
+- Open Sunshine and confirm it is running.
+- Confirm Hyprland reports an active monitor.
+- Run `omdesk setup` again if the Sunshine password changed.
+- Check that keyboard and mouse input are enabled in Sunshine.
 
-If Sunshine is reported as not ready:
+### Pairing fails
 
-- Confirm `sunshine --version` succeeds.
-- Confirm `systemctl --user is-active sunshine.service` succeeds.
-- Confirm `hyprctl monitors -j` reports an enabled display.
-- Check that `keyboard` and `mouse` are not set to `disabled` in `~/.config/sunshine/sunshine.conf`.
+- Run `omdesk setup` on the remote computer, not only on the controller.
+- Confirm the stored username and password match Sunshine's web interface.
+- Remove the old host from Moonlight and retry if the pairing state is stale.
 
-If pairing fails:
-
-- Run `omdesk setup` on the controlled host, not only on the controller.
-- Confirm the stored credentials match Sunshine's admin credentials.
-- Confirm `moonlight pair` prints a four-digit PIN to standard output within 20 seconds.
-
-For an SSH-assisted local pairing flow, run this on the Sunshine host after Moonlight displays a PIN:
+If Moonlight shows a PIN and you need to approve it manually on the Sunshine computer, run:
 
 ```bash
 omdesk sunshine-pin 1234 --name moonlight

@@ -1,58 +1,118 @@
 # Omarchy Desk
 
-Omarchy Desk connects one Omarchy desktop to another over a Tailnet. It discovers hosts through Tailscale, reads and focuses Hyprland workspaces and windows, coordinates Moonlight pairing with Sunshine, and launches the Moonlight stream. Video, audio, and input travel directly between Moonlight and Sunshine; the Omarchy Desk agent handles only discovery and control requests.
+Omarchy Desk lets you use one Omarchy computer from another through Tailscale. It finds your computers, prepares Sunshine on the remote machine, pairs it with Moonlight, and opens the stream from a terminal interface.
 
-Current features include:
+The video, sound, and input connection runs directly between Moonlight and Sunshine. Omarchy Desk handles setup and desktop controls without carrying the stream itself.
 
-- Tailnet discovery from the CLI or terminal UI
-- Remote display, workspace, and window inspection
-- Sunshine and Moonlight pairing
-- Full-screen or windowed streaming with resolution, frame rate, codec, bitrate, and keyboard-capture options
-- Optional access restriction by Tailscale stable node ID
-- JSON output for discovery and inspection commands
+## What you can do
+
+- Find Omarchy computers on your Tailnet
+- Connect from an interactive terminal interface
+- Pair Moonlight and Sunshine
+- Choose the resolution, frame rate, codec, bitrate, and window mode
+- Follow the focused monitor while working on a multi-monitor desktop
+- Inspect remote displays, workspaces, and windows from the command line
+- Limit access to specific Tailscale devices
 
 ## Requirements
 
-Omarchy Desk currently targets Omarchy 4 on x86-64 Arch Linux. Each host needs Tailscale and Hyprland. A controlled host also needs Sunshine; a controller needs the `moonlight` command from Moonlight Qt.
+Omarchy Desk currently supports Omarchy 4 on x86-64 systems.
 
-Building requires Rust 1.88 or newer.
+On every computer you want to control:
 
-## Build
+- Tailscale must be connected
+- Sunshine must be installed and running
+- Hyprland must be running in the current desktop session
+- `omdesk-agent` must run as your desktop user
 
-Build the workspace:
+On the computer you use as the controller:
+
+- Tailscale must be connected
+- Moonlight Qt must be installed
+- The `moonlight` command must be available
+
+## Build from source
+
+Install Rust 1.88 or newer, then run:
 
 ```bash
 cargo build --release --locked --workspace
 ```
 
-The resulting executables are `target/release/omdesk` and `target/release/omdesk-agent`. The repository includes an Arch package definition and a user systemd unit under `packaging/`, but it does not include a complete source-install script.
+The binaries are created at:
 
-## Quick start
+```text
+target/release/omdesk
+target/release/omdesk-agent
+```
 
-On each controlled host, store the Sunshine admin credentials used for automated pairing, then start the agent:
+Copy both files to a directory in your `PATH`. If you want the agent to start with your desktop session, also install `packaging/systemd/omdesk-agent.service` as a user service.
+
+## Set up a computer for remote access
+
+Run these commands on the computer you want to control:
 
 ```bash
 omdesk setup
 systemctl --user enable --now omdesk-agent.service
 ```
 
-Both machines must be connected to Tailscale. On the controller:
+`omdesk setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
+
+Check the setup with:
+
+```bash
+omdesk doctor
+```
+
+## Connect
+
+Make sure both computers are online in Tailscale. On the controller, open the terminal interface:
+
+```bash
+omdesk
+```
+
+Select a ready device with the arrow keys and press `Enter` to connect. Press `s` to change stream settings or `r` to scan again.
+
+You can also connect directly from the command line:
+
+```bash
+omdesk devices
+omdesk connect workstation
+```
+
+Omarchy Desk pairs Moonlight and Sunshine automatically when needed.
+
+## Shortcuts during a stream
+
+Remote input mode lets Omarchy Desk send system shortcuts to the remote desktop.
+
+- `Super+R` switches shortcut capture between the remote and local desktops
+- `Super+Q` closes the remote session
+- `Ctrl+Alt+Shift+Z` remains available as Moonlight's fallback capture shortcut
+
+When capture is released, local shortcuts work normally on the controller.
+
+## Common commands
 
 ```bash
 omdesk devices
 omdesk pair workstation
-omdesk connect workstation
+omdesk connect workstation --windowed
+omdesk connect workstation --width 2560 --height 1440 --fps 120
+omdesk doctor
 ```
 
-Run `omdesk` without a subcommand to open the terminal UI. Run `omdesk --help` or `omdesk <command> --help` for the complete command syntax.
+Run `omdesk --help` or `omdesk <command> --help` to see every available option.
 
-## Documentation
+## More help
 
 - [User guide](docs/usage.md)
 - [Configuration and access control](docs/configuration.md)
-- [Architecture](docs/architecture.md)
-- [Development](docs/development.md)
+- [Troubleshooting and development](docs/development.md)
+- [How Omarchy Desk works](docs/architecture.md)
 
 ## License
 
-Omarchy Desk is licensed under the [MIT License](LICENSE).
+Omarchy Desk is available under the [MIT License](LICENSE).

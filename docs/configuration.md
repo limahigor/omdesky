@@ -1,13 +1,14 @@
 # Configuration and access control
 
-Omarchy Desk loads optional TOML configuration from:
+Omarchy Desk works without a configuration file. Create one only when you want to change stream defaults, use a different agent port, or assign shorter names to devices.
 
-- `$XDG_CONFIG_HOME/omdesk/config.toml`, when `XDG_CONFIG_HOME` is set
-- `~/.config/omdesk/config.toml` otherwise
+The file is read from `$XDG_CONFIG_HOME/omdesk/config.toml` when `XDG_CONFIG_HOME` is set. Otherwise, use:
 
-Missing files, sections, and fields use built-in defaults.
+```text
+~/.config/omdesk/config.toml
+```
 
-## Configuration reference
+## Example
 
 ```toml
 [general]
@@ -33,41 +34,64 @@ mode = "follow-focus"
 [input]
 escape_chord = "CTRL+ALT+SHIFT+Z"
 
-[files]
-enabled = false
-inbox = "~/Downloads/OmarchyDesk"
-
 [devices.office]
 alias = "workstation"
 default_display = "DP-1"
 default_workspace = "2"
 ```
 
-`general.default_input` accepts `local` or `remote` and defaults to `remote`. The terminal UI always captures system shortcuts so they reach the remote desktop. Press `Ctrl+Alt+Shift+Z` in Moonlight to unlock input; local shortcuts such as `Super+W` then affect the stream window. CLI `connect` defaults to `local` unless `--input` is supplied.
+Missing settings use the built-in defaults.
 
-`network.agent_port` is used by the agent listener and by clients during discovery and control requests. `OMDESK_AGENT_PORT` overrides it and must be an integer from 0 through 65535.
+## Stream settings
 
-`network.allow_unsafe_wildcard_bind` disables the agent's built-in check that its selected address resembles a Tailscale address. It does not change the listener to a wildcard address; the agent still binds the address returned by Tailscale.
+The terminal interface reads the values under `[stream]`:
 
-The terminal UI uses the values under `stream`. CLI `connect` has fixed defaults for width, height, FPS, codec, and audio. It uses `stream.bitrate_mbps` only when `--bitrate` is absent. A bitrate of `0` leaves Moonlight's bitrate unchanged.
+- `width` and `height` set the stream resolution.
+- `fps` sets the requested frame rate.
+- `codec` accepts `auto`, `h264`, `hevc`, or `av1`.
+- `bitrate_mbps` sets the bitrate in megabits per second. Use `0` to leave Moonlight's bitrate unchanged.
+- `audio` stores the audio preference.
 
-`display.mode` selects how the remote session chooses which monitor to stream. It currently accepts only `follow-focus`, which keeps the streamed monitor aligned with the monitor focused on the remote Hyprland session without restarting Moonlight or Sunshine. The value is chosen in the terminal UI settings screen and stored here for future modes.
+The command-line `connect` command uses its command-line defaults. Pass explicit options when you want a different resolution, frame rate, codec, or window mode.
 
-A key under `devices` can be used as a command target. Its `alias` is substituted before Omarchy Desk matches a Tailscale peer. `default_display` and `default_workspace` are currently not used.
+## Display behavior
 
-The current implementation does not consult `general.notifications`, `general.default_input`, `input.escape_chord`, `network.strict_tailnet_only`, or the `files` section. Audio values are parsed but are not translated into Moonlight arguments.
+`display.mode = "follow-focus"` keeps the stream on the monitor currently focused in the remote Hyprland session. Switching focus to a window on another monitor changes the streamed display without restarting Moonlight or Sunshine.
 
-## Network boundary
+## Device names
 
-The agent selects the first IPv4 Tailscale address reported for the local node, or the first available Tailscale address when no IPv4 address is present. It listens on that address and `network.agent_port`.
+Entries under `[devices]` provide convenient command targets. In this example, `office` resolves through the alias `workstation`:
 
-Omarchy Desk control requests use plain HTTP over the Tailnet. Omarchy Desk does not add TLS or bearer tokens to this connection. Tailscale provides the network path and source identity, and Tailscale Grants determine which peers can reach the listener.
+```bash
+omdesk connect office
+```
 
-`GET /v1/health` is unauthenticated and returns only agent status, protocol version, and agent version. For every other endpoint, the agent passes the TCP source address to `tailscale whois --json` and rejects callers that do not resolve to a Tailscale stable node ID.
+`default_display` and `default_workspace` are stored for future use and do not currently change a connection.
 
-## Access allowlist
+## Agent port
 
-By default, an empty Omarchy Desk allowlist accepts any caller that Tailscale identifies and permits to reach the agent. To restrict agent requests further, add controller identities on the controlled host:
+The default agent port is `48155`. Set the same value on every computer that runs the agent and every controller that connects to it:
+
+```toml
+[network]
+agent_port = 48155
+```
+
+The environment variable `OMDESK_AGENT_PORT` overrides the file for one process:
+
+```bash
+OMDESK_AGENT_PORT=49000 omdesk devices
+```
+
+The agent listens only on the local Tailscale address. `allow_unsafe_wildcard_bind` disables the address-range safety check, but it does not make the agent listen on every network interface.
+
+## Access control
+
+Tailscale is the first access boundary. Your Tailscale policy must allow the controller to reach the remote computer's agent port.
+
+Omarchy Desk also has a local allowlist. An empty list accepts any caller that Tailscale can identify and route to the agent. Once you add an entry, only listed controllers are accepted.
+
+Run these commands on the remote computer:
 
 ```bash
 omdesk access allow controller-hostname
@@ -75,39 +99,18 @@ omdesk access list
 omdesk access revoke controller-hostname
 ```
 
-`allow` accepts a visible Tailscale hostname, stable node ID, or IP address and stores the resolved stable node ID. Once the list contains an entry, every authenticated agent endpoint requires an exact match. `revoke` is idempotent.
+The allowlist is stored at `$XDG_STATE_HOME/omdesk/access/allowlist.json`, or `~/.local/state/omdesk/access/allowlist.json` when `XDG_STATE_HOME` is unset.
 
-The list is stored at:
+Use Tailscale hostnames or addresses when adding a controller. Omarchy Desk resolves them to the stable Tailscale device identity before saving the entry.
 
-- `$XDG_STATE_HOME/omdesk/access/allowlist.json`, or
-- `~/.local/state/omdesk/access/allowlist.json`
+## Sunshine credentials
 
-On Unix, the file is created with mode `0644`. Its JSON format is:
+`omdesk setup` stores the Sunshine web-interface username and password in the desktop user's Linux Secret Service collection. The credentials are not written to `config.toml` or another plaintext configuration file.
 
-```json
-[
-  {
-    "tailnet_node_id": "stable-tailscale-node-id",
-    "label": "controller-hostname",
-    "added_at": "2026-09-08T12:00:00Z"
-  }
-]
-```
+Run setup from an unlocked graphical session so the session D-Bus and Secret Service are available. The agent reads the keyring entry when approving a pairing request through Sunshine on the same computer, so restarting it is not required after updating the credentials.
 
-Access-list commands modify the local machine's file. Run them on each controlled host whose agent you want to restrict. Keep Tailscale Grants in place as the outer network policy.
+Existing `sunshine-credentials.json` files are migrated into Secret Service and deleted after a successful migration.
 
-## Other stored data
+## Settings reserved for later use
 
-The agent creates a Omarchy Desk node UUID in:
-
-- `$XDG_STATE_HOME/omdesk/identity/node.json`, or
-- `~/.local/state/omdesk/identity/node.json`
-
-This UUID identifies the Omarchy Desk installation in node metadata. It is not an authentication credential.
-
-Sunshine credentials are stored in:
-
-- `$XDG_CONFIG_HOME/omdesk/sunshine-credentials.json`, or
-- `~/.config/omdesk/sunshine-credentials.json`
-
-The file contains a JSON `username` and `password` and is created with mode `0600` on Unix. The agent reloads it for each Sunshine request, so running `omdesk setup` does not require an agent restart.
+The current release stores but does not apply `general.notifications`, `general.default_input`, `input.escape_chord`, and `network.strict_tailnet_only`. Keep their default values unless you are testing upcoming behavior.

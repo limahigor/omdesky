@@ -1,97 +1,101 @@
 # Development
 
-## Prerequisites
+This page covers building, testing, and diagnosing Omarchy Desk from a source checkout.
 
-Omarchy Desk is a Rust 2024 workspace with a minimum supported Rust version of 1.88. Install a Rust toolchain with Cargo, rustfmt, and Clippy.
+## Requirements
 
-Most unit tests do not require a running Omarchy desktop. Testing runtime behavior requires Omarchy 4, Hyprland, Tailscale, Sunshine, Moonlight Qt, and a user systemd session.
+Use Rust 1.88 or newer with Cargo, rustfmt, and Clippy. Most tests run on any Linux development machine. Testing real connections requires Omarchy 4, Hyprland, Tailscale, Sunshine, Moonlight Qt, and a user systemd session.
 
 ## Build and run
 
-Build all workspace crates:
+Build the workspace:
 
 ```bash
 cargo build --workspace
 ```
 
-Build the release binaries with the locked dependency versions:
+Open the terminal interface:
 
 ```bash
-cargo build --release --locked --workspace
-```
-
-Run the CLI or terminal UI from the workspace:
-
-```bash
-cargo run -p omdesk-cli --bin omdesk -- --help
 cargo run -p omdesk-cli --bin omdesk
 ```
 
-Run the agent in the current desktop session:
+Run a command:
+
+```bash
+cargo run -p omdesk-cli --bin omdesk -- devices
+```
+
+Start the agent in the current desktop session:
 
 ```bash
 cargo run -p omdesk-agent --bin omdesk-agent
 ```
 
-The agent binds to the local Tailscale address. It exits if Omarchy 4 cannot be detected, Tailscale does not report a local address, or the listener cannot be created.
+The agent stops during startup if it cannot detect Omarchy 4, obtain a Tailscale address, or open its listener.
+
+## Release build
+
+Use the lockfile for distributable binaries:
+
+```bash
+cargo build --release --locked --workspace
+```
+
+Release builds do not initialize debug tracing and do not show debug-only desktop notifications.
 
 ## Checks
 
-The continuous integration workflow runs:
+Run the same checks used by the project before submitting a change:
 
 ```bash
 cargo fmt --all --check
+cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
 ```
 
-Run the same commands before submitting a change.
+Tests cover validation, protocol data, command construction, Tailscale and Hyprland response parsing, Sunshine readiness, credentials, state files, desktop launchers, themes, and terminal rendering. Credential tests use an in-memory backend and do not require a live D-Bus session or Secret Service. They do not replace testing with live desktop services.
 
-The test suite covers domain validation, protocol serialization, command parsing and construction, Tailscale and Hyprland JSON mapping, Sunshine readiness and credentials, state files, launchers, theme loading, and terminal UI behavior. It does not exercise live Tailscale, Hyprland, Sunshine, Moonlight, or systemd services.
+## Debug output
 
-## Project structure
+Debug builds can emit structured runtime details through `RUST_LOG`:
 
-- `crates/omdesk-core`: domain types and validation
-- `crates/omdesk-protocol`: HTTP protocol data types
-- `crates/omdesk-application`: workflows and external-service interfaces
-- `crates/omdesk-platform`: operating-system and application adapters
-- `crates/omdesk-agent`: agent HTTP server
-- `crates/omdesk-cli`: command-line executable
-- `crates/omdesk-tui`: terminal interface
-- `packaging/arch`: Arch package definition
-- `packaging/systemd`: user service unit
+```bash
+RUST_LOG=debug cargo run -p omdesk-agent --bin omdesk-agent
+RUST_LOG=debug cargo run -p omdesk-cli --bin omdesk -- devices
+```
 
-See [Architecture](architecture.md) for the runtime relationships.
+User-facing errors remain short and actionable. Debug output contains the underlying operation, error code, and technical detail needed for diagnosis. Do not include passwords or other secrets in logs.
 
-## Packaging
-
-The package definition in `packaging/arch/PKGBUILD` builds the whole workspace and installs `omdesk`, `omdesk-agent`, the user service, and the license. It declares x86-64 Arch Linux and runtime dependencies on Tailscale, Sunshine, and Moonlight Qt.
-
-The `PKGBUILD` has no source entries and expects Cargo sources in its working directory. Stage it with the repository contents in a package build directory before invoking `makepkg`; running it directly from `packaging/arch` will not find the workspace manifest.
-
-## Runtime diagnostics
-
-Use text output while developing interactively:
+For a quick environment check, run:
 
 ```bash
 omdesk doctor
 omdesk devices --all-tailnet
 ```
 
-Use JSON when inspecting or scripting behavior:
+Add `--json` when comparing output in a script or test.
+
+## Workspace layout
+
+- `crates/omdesk-core` contains shared values and validation.
+- `crates/omdesk-protocol` contains the JSON request and response types.
+- `crates/omdesk-application` contains discovery, pairing, connection, and display behavior.
+- `crates/omdesk-platform` integrates with Tailscale, Hyprland, Moonlight, Sunshine, files, processes, and desktop notifications.
+- `crates/omdesk-agent` provides the service that runs on a remote computer.
+- `crates/omdesk-cli` provides commands and starts the terminal interface.
+- `crates/omdesk-tui` renders and controls the terminal interface.
+- `packaging/arch` contains the Arch package definition.
+- `packaging/systemd` contains the user service.
+
+## Packaging
+
+`packaging/arch/PKGBUILD` installs `omdesk`, `omdesk-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
+
+After installing the package, enable the agent for the current user:
 
 ```bash
-omdesk doctor --json
-omdesk devices --json
-omdesk info HOST --json
-omdesk displays HOST --json
-omdesk workspaces HOST --json
-omdesk windows HOST --json
-```
-
-Both executables initialize tracing from the standard `tracing_subscriber` environment filter. Set `RUST_LOG` when more runtime detail is needed, for example:
-
-```bash
-RUST_LOG=debug cargo run -p omdesk-agent --bin omdesk-agent
+systemctl --user enable --now omdesk-agent.service
 ```

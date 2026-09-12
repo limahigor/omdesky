@@ -1,76 +1,70 @@
-# Architecture
+# How Omarchy Desk works
 
-Omarchy Desk separates control from streaming. The controller uses the agent to inspect and prepare a remote Omarchy session, then launches Moonlight directly against Sunshine. The agent is not in the stream path.
+Omarchy Desk has a controller and an agent. The controller is the computer where you launch Moonlight. The agent runs on the Omarchy computer you want to use.
+
+The agent helps the controller find the desktop, check Sunshine, approve pairing, and perform a small set of desktop actions. Once the stream starts, Moonlight connects directly to Sunshine. Closing the agent does not place an extra relay in the video or audio path.
 
 ```text
-Control:
-omdesk -> HTTP over Tailscale -> omdesk-agent -> Tailscale / Hyprland / Sunshine API
+Setup and controls:
+omdesk -> Tailscale -> omdesk-agent -> Hyprland and Sunshine
 
-Stream:
-Moonlight -> Tailscale network -> Sunshine
+Video, audio, and input:
+Moonlight -> Tailscale -> Sunshine
 ```
 
 ## Programs
 
 ### `omdesk`
 
-The controller program provides the command-line interface and terminal UI. It reads Tailscale peer state, probes agents, sends control requests, coordinates pairing, and starts the local `moonlight` process.
+`omdesk` provides both the command-line tools and the interactive terminal interface. It finds compatible computers through Tailscale, asks the agent about the remote desktop, pairs Moonlight with Sunshine, and starts Moonlight locally.
 
 ### `omdesk-agent`
 
-The agent runs as the logged-in desktop user on the controlled host. At startup it:
+`omdesk-agent` runs as the signed-in desktop user on the remote computer. It uses the current Hyprland session and binds to that computer's Tailscale address.
 
-1. verifies that Omarchy major version 4 is installed;
-2. loads or creates a persistent Omarchy Desk node UUID;
-3. obtains the local Tailscale address;
-4. binds the control API to that address and the configured port.
+During startup, it checks the Omarchy version, obtains the local Tailscale identity, loads its saved device identity, and opens the configured agent port.
 
-The agent exposes versioned JSON endpoints for node metadata, displays, workspaces, windows, focus actions, Sunshine status, and pairing. It does not expose a general command endpoint or a raw Hyprland dispatch endpoint.
+## What happens when you connect
 
-## Connection flow
+When you run `omdesk connect workstation`, Omarchy Desk:
 
-For `omdesk connect TARGET`, the controller:
+1. finds `workstation` in Tailscale;
+2. asks its agent whether Sunshine is ready;
+3. checks whether Moonlight already trusts that Sunshine host;
+4. completes pairing when needed;
+5. optionally focuses a requested workspace or window;
+6. starts Moonlight against the remote Tailscale address;
+7. restores local shortcut behavior when the stream ends.
 
-1. resolves the target from a Tailnet IP, Tailscale peer, or configured device entry;
-2. requests the remote Sunshine status;
-3. checks whether Moonlight is paired with that host;
-4. runs the pairing flow when needed;
-5. optionally asks the agent to focus a workspace or window;
-6. launches `moonlight stream` directly against the host address;
-7. waits for Moonlight to exit.
+For multi-monitor desktops, follow-focus watches which remote monitor has the focused window. It sends Moonlight's display-switch shortcut when the focus moves to another monitor.
 
-Workspace and window operations are narrow Hyprland actions. The agent executes `hyprctl` JSON queries and validated workspace or window focus commands. Window handles must use Hyprland's `0x` hexadecimal address form, and named workspaces cannot be empty or contain whitespace.
+## Pairing
 
-## Pairing flow
+Moonlight and Sunshine perform the actual pairing. Omarchy Desk only carries the one-time PIN between them:
 
-Omarchy Desk coordinates the existing Moonlight and Sunshine pairing process:
+1. Moonlight creates a four-digit PIN on the controller.
+2. The controller sends that PIN to the remote agent.
+3. The agent submits it to Sunshine on the same computer.
+4. Moonlight confirms that pairing succeeded.
 
-1. the controller starts `moonlight pair HOST`;
-2. Omarchy Desk reads a four-digit PIN from Moonlight's standard output;
-3. the controller sends the PIN and client name to the remote agent;
-4. the agent submits them to Sunshine's local HTTPS API at `127.0.0.1:47990` using credentials stored on that host;
-5. the controller asks Moonlight for the host's pairing state again.
+The Sunshine username and password remain on the remote computer. They are never sent to the controller.
 
-Sunshine credentials stay on the controlled host and are not included in the Omarchy Desk API. Moonlight and Sunshine retain ownership of the pairing protocol and stream connection.
+## Network access
 
-## Network and authorization
+The agent listens on the local Tailscale address rather than a public network interface. Tailscale provides the private route and identifies the calling device.
 
-The agent control API uses HTTP on the host's Tailscale address. The health endpoint is open to callers that can reach the listener. Other endpoints derive the caller identity by running `tailscale whois --json` against the connection's source IP.
+The health check is available to any device that can reach the port. Every other request must resolve to a Tailscale device identity. A local Omarchy Desk allowlist can further restrict which Tailscale devices may control the computer.
 
-An empty local allowlist accepts any source with a Tailscale stable node ID, subject to Tailscale network policy. A nonempty allowlist adds an exact stable-node-ID check. See [Configuration and access control](configuration.md) for operational details.
+See [Configuration and access control](configuration.md) for setup instructions.
 
-Sunshine exposes a separate local HTTPS API. Omarchy Desk accepts Sunshine's self-signed certificate because requests are made only to the hard-coded loopback endpoint.
+## Safety boundaries
 
-## Workspace layout
+The agent accepts only the actions Omarchy Desk needs, such as listing displays, focusing a workspace, and managing a stream session. It does not provide a general remote shell or accept arbitrary Hyprland commands.
 
-The Rust workspace is divided by role:
+External programs are launched with separate argument values rather than commands assembled for a shell. Sunshine credentials stay on the remote computer in the desktop user's Linux Secret Service collection and are loaded only when needed.
 
-- `omdesk-core` contains domain values for nodes, displays, workspaces, windows, streams, input modes, and sessions.
-- `omdesk-protocol` defines protocol version 1 request, response, and error types.
-- `omdesk-application` contains discovery, pairing, and connection workflows plus the interfaces they use.
-- `omdesk-platform` implements those interfaces with Tailscale, Hyprland, Moonlight, Sunshine, files, processes, notifications, and desktop launchers.
-- `omdesk-agent` contains the Axum HTTP API and agent executable.
-- `omdesk-cli` contains the Clap command-line executable and starts the terminal UI when no subcommand is given.
-- `omdesk-tui` contains the Ratatui interface.
+## Source layout
 
-This arrangement keeps external command formats and filesystem details out of the application workflows and protocol data types.
+The Rust workspace separates shared data, connection behavior, operating-system integrations, and user interfaces into individual crates. This keeps the network messages stable and limits desktop-specific behavior to the parts that call Tailscale, Hyprland, Sunshine, and Moonlight.
+
+For build commands and crate details, see [Development](development.md).
