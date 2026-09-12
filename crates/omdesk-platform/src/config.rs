@@ -184,7 +184,7 @@ pub fn access_path() -> Result<PathBuf, ConfigError> {
     state_dir().map(|directory| directory.join("access/allowlist.json"))
 }
 
-pub fn sunshine_credentials_path() -> Result<PathBuf, ConfigError> {
+pub fn legacy_sunshine_credentials_path() -> Result<PathBuf, ConfigError> {
     config_dir().map(|directory| directory.join("sunshine-credentials.json"))
 }
 

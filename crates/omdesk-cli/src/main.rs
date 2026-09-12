@@ -15,8 +15,8 @@ use omdesk_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
     config::{
-        Config, access_path, runtime_session_path, state_dir, sunshine_config_path,
-        sunshine_credentials_path,
+        Config, access_path, legacy_sunshine_credentials_path, runtime_session_path, state_dir,
+        sunshine_config_path,
     },
     hyprland::HyprlandAdapter,
     input::HyprlandSessionKeybinds,
@@ -24,7 +24,7 @@ use omdesk_platform::{
     moonlight::MoonlightAdapter,
     omarchy::{OmarchyNotificationAdapter, detect_version},
     process::TokioCommandRunner,
-    sunshine::SunshineAdapter,
+    sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
 use omdesk_protocol::SunshinePairRequest;
@@ -278,6 +278,12 @@ fn agent_client() -> Arc<HttpAgentClient> {
     Arc::new(HttpAgentClient::new())
 }
 
+fn sunshine_credential_store() -> Result<SunshineCredentialStore> {
+    Ok(SunshineCredentialStore::new(Some(
+        legacy_sunshine_credentials_path()?,
+    )))
+}
+
 async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
     let config = Config::load()?;
     let runner = Arc::new(TokioCommandRunner);
@@ -435,7 +441,7 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
         runner,
         sunshine_config_path()?,
         omdesk_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        Some(sunshine_credentials_path()?),
+        sunshine_credential_store()?,
     );
 
     adapter
@@ -643,19 +649,27 @@ async fn doctor(json: bool) -> Result<()> {
         runner,
         sunshine_config_path()?,
         omdesk_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        Some(sunshine_credentials_path()?),
+        sunshine_credential_store()?,
     )
     .readiness()
     .await;
 
-    let credentials_path = sunshine_credentials_path()?;
-    let sunshine_pairing = if credentials_path.exists() {
-        json!({"status": "PASS", "message": "Sunshine admin credentials configured on this host"})
-    } else {
-        json!({
+    let credential_store = sunshine_credential_store()?;
+    let credential_status = tokio::task::spawn_blocking(move || credential_store.load())
+        .await
+        .context("query desktop Secret Service")?;
+    let sunshine_pairing = match credential_status {
+        Ok(Some(_)) => {
+            json!({"status": "PASS", "message": "Sunshine admin credentials configured on this host"})
+        }
+        Ok(None) => json!({
             "status": "WARN",
             "message": "Sunshine admin credentials missing; run `omdesk setup` on this host to enable pairing"
-        })
+        }),
+        Err(_) => json!({
+            "status": "FAIL",
+            "message": "The desktop Secret Service is unavailable or locked"
+        }),
     };
 
     let report = json!({
@@ -726,18 +740,21 @@ async fn setup() -> Result<()> {
     std::fs::create_dir_all(directory.join("identity"))?;
     std::fs::create_dir_all(directory.join("access"))?;
 
-    provision_sunshine_credentials()?;
+    provision_sunshine_credentials().await?;
 
     doctor(false).await
 }
 
-fn provision_sunshine_credentials() -> Result<()> {
-    let path = sunshine_credentials_path()?;
-    if path.exists() {
-        println!(
-            "Sunshine credentials already configured at {}",
-            path.display()
-        );
+async fn provision_sunshine_credentials() -> Result<()> {
+    let store = sunshine_credential_store()?;
+    let lookup = store.clone();
+
+    if tokio::task::spawn_blocking(move || lookup.load())
+        .await
+        .context("query desktop Secret Service")??
+        .is_some()
+    {
+        println!("Sunshine credentials already configured in the desktop Secret Service");
         return Ok(());
     }
 
@@ -753,7 +770,7 @@ fn provision_sunshine_credentials() -> Result<()> {
                 return Ok(());
             }
             let username = prompt("Sunshine admin username: ")?;
-            let password = prompt("Sunshine admin password: ")?;
+            let password = rpassword::prompt_password("Sunshine admin password: ")?;
             (username, password)
         }
     };
@@ -763,9 +780,11 @@ fn provision_sunshine_credentials() -> Result<()> {
         return Ok(());
     }
 
-    omdesk_platform::sunshine::store_credentials(&path, &username, &password)
-        .context("write Sunshine credentials")?;
-    println!("Stored Sunshine credentials at {}", path.display());
+    tokio::task::spawn_blocking(move || store.store(&username, &password))
+        .await
+        .context("update desktop Secret Service")?
+        .context("store Sunshine credentials in the desktop Secret Service")?;
+    println!("Stored Sunshine credentials in the desktop Secret Service");
     Ok(())
 }
 

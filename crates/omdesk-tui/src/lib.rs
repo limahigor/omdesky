@@ -12,12 +12,12 @@ use omdesk_core::{
 use omdesk_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{Config, access_path, state_dir, sunshine_credentials_path},
+    config::{Config, access_path, legacy_sunshine_credentials_path, state_dir},
     input::HyprlandSessionKeybinds,
     moonlight::MoonlightAdapter,
     omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
-    sunshine::store_credentials,
+    sunshine::SunshineCredentialStore,
     tailscale::TailscaleAdapter,
     theme::{OmarchyTheme, Rgb, ThemeWatcher},
 };
@@ -54,7 +54,7 @@ struct Services {
     stream: Arc<MoonlightAdapter>,
     notifications: Arc<OmarchyNotificationAdapter>,
     access: Arc<FileAccessStore>,
-    sunshine_credentials_path: PathBuf,
+    sunshine_credentials: SunshineCredentialStore,
     agent_port: u16,
     client_name: String,
 }
@@ -78,14 +78,12 @@ impl Services {
             stream: Arc::new(MoonlightAdapter::new(runner)),
             notifications: Arc::new(OmarchyNotificationAdapter::default()),
             access: Arc::new(FileAccessStore::new(access_path()?)),
-            sunshine_credentials_path: sunshine_credentials_path()?,
+            sunshine_credentials: SunshineCredentialStore::new(Some(
+                legacy_sunshine_credentials_path()?,
+            )),
             agent_port: config.network.agent_port,
             client_name: env::var("HOSTNAME").unwrap_or_else(|_| "omdesk".to_owned()),
         })
-    }
-
-    fn sunshine_configured(&self) -> bool {
-        self.sunshine_credentials_path.exists()
     }
 
     fn connect_service(&self) -> ConnectNode {
@@ -175,6 +173,8 @@ enum AsyncMessage {
     Discovery(DiscoveryResult),
     Activity(Result<String, String>),
     Access(Result<Vec<AccessRow>, String>),
+    CredentialStatus(Result<bool, String>),
+    CredentialStored(Result<(), String>),
 }
 
 struct AppState {
@@ -402,6 +402,40 @@ fn start_access_revoke(
     });
 }
 
+fn start_credential_status(
+    credentials: SunshineCredentialStore,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || credentials.load())
+            .await
+            .map_err(|_| "The desktop Secret Service could not be queried".to_owned())
+            .and_then(|result| {
+                result
+                    .map(|credentials| credentials.is_some())
+                    .map_err(|error| error.to_string())
+            });
+
+        let _ = sender.send(AsyncMessage::CredentialStatus(result)).await;
+    });
+}
+
+fn start_credential_store(
+    credentials: SunshineCredentialStore,
+    username: String,
+    password: String,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || credentials.store(&username, &password))
+            .await
+            .map_err(|_| "The desktop Secret Service could not be updated".to_owned())
+            .and_then(|result| result.map_err(|error| error.to_string()));
+
+        let _ = sender.send(AsyncMessage::CredentialStored(result)).await;
+    });
+}
+
 fn user_error(context: &str, error: &PortError) -> String {
     tracing::debug!(
         code = error.code,
@@ -451,6 +485,21 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
                 state.error = Some(error);
             }
         },
+        AsyncMessage::CredentialStatus(result) => match result {
+            Ok(configured) => state.sunshine_configured = configured,
+            Err(error) => state.error = Some(error),
+        },
+        AsyncMessage::CredentialStored(result) => match result {
+            Ok(()) => {
+                state.sunshine_configured = true;
+                state.notice = Some("Sunshine credentials saved".to_owned());
+                state.error = None;
+            }
+            Err(error) => {
+                state.error = Some(format!("Could not save credentials: {error}"));
+                state.notice = None;
+            }
+        },
     }
 }
 
@@ -479,7 +528,8 @@ async fn run_loop(
 ) -> anyhow::Result<()> {
     let (sender, mut receiver) = mpsc::channel(16);
     state.loading = true;
-    state.sunshine_configured = services.sunshine_configured();
+    start_credential_status(services.sunshine_credentials.clone(), sender.clone());
+
     let loaded = Config::load().ok();
     state.stream_profile = loaded.as_ref().map(stream_profile).unwrap_or_default();
     state.display_mode = loaded.map(|config| config.display.mode).unwrap_or_default();
@@ -552,7 +602,8 @@ fn handle_key(
             start_refresh(services.discovery.clone(), sender.clone());
         }
         KeyCode::Char('s') => {
-            state.sunshine_configured = services.sunshine_configured();
+            start_credential_status(services.sunshine_credentials.clone(), sender.clone());
+
             let loaded = Config::load().ok();
             state.stream_profile = loaded.as_ref().map(stream_profile).unwrap_or_default();
             state.display_mode = loaded.map(|config| config.display.mode).unwrap_or_default();
@@ -645,18 +696,15 @@ fn handle_overlay_key(
             }
             KeyCode::Char(character) if !character.is_control() => pass.push(character),
             KeyCode::Enter if !pass.is_empty() => {
-                let result = store_credentials(&services.sunshine_credentials_path, user, pass);
-                match result {
-                    Ok(()) => {
-                        state.sunshine_configured = true;
-                        state.notice = Some("Sunshine credentials saved".to_owned());
-                        state.error = None;
-                    }
-                    Err(error) => {
-                        state.error = Some(format!("Could not save credentials: {error}"));
-                        state.notice = None;
-                    }
-                }
+                let username = std::mem::take(user);
+                let password = std::mem::take(pass);
+
+                start_credential_store(
+                    services.sunshine_credentials.clone(),
+                    username,
+                    password,
+                    sender.clone(),
+                );
                 state.overlay = Some(Overlay::Menu {
                     selected: StreamSetting::Resolution,
                 });
@@ -709,7 +757,7 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let outer = centered_area(frame.area());
     let sections = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(6),
         Constraint::Min(11),
         Constraint::Length(3),
         Constraint::Length(3),
@@ -1119,9 +1167,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
     };
 
     let lines = vec![
+        Line::from(Span::styled(
+            "╭────╮",
+            Style::default().fg(mark).add_modifier(Modifier::BOLD),
+        )),
         Line::from(vec![
             Span::styled(
-                "┃ ⬢ ┃",
+                "│ ╭────╮",
                 Style::default().fg(mark).add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
@@ -1138,12 +1190,16 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
         ]),
         Line::from(vec![
             Span::styled(
-                "┗━━━┛",
+                "╰─│    │",
                 Style::default().fg(mark).add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
             status,
         ]),
+        Line::from(Span::styled(
+            "  ╰────╯",
+            Style::default().fg(mark).add_modifier(Modifier::BOLD),
+        )),
     ];
 
     frame.render_widget(
@@ -1776,11 +1832,11 @@ mod tests {
     }
 
     #[test]
-    fn test_header_keeps_title_and_status_on_adjacent_lines() {
+    fn test_header_keeps_complete_logo_and_centers_title() {
         let mut state = state();
         apply_refresh(&mut state, Ok(vec![node("workstation")]));
         let theme = state.theme.current().clone();
-        let backend = TestBackend::new(60, 5);
+        let backend = TestBackend::new(60, 6);
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
         terminal
@@ -1788,15 +1844,29 @@ mod tests {
             .expect("draw header");
 
         let buffer = terminal.backend().buffer();
-        let title = (0..60)
-            .map(|column| buffer.cell((column, 1)).expect("title cell").symbol())
+        let top = (0..60)
+            .map(|column| buffer.cell((column, 1)).expect("top cell").symbol())
             .collect::<String>();
-        let status = (0..60)
-            .map(|column| buffer.cell((column, 2)).expect("status cell").symbol())
+        let middle = (0..60)
+            .map(|column| buffer.cell((column, 2)).expect("middle cell").symbol())
+            .collect::<String>();
+        let lower_middle = (0..60)
+            .map(|column| {
+                buffer
+                    .cell((column, 3))
+                    .expect("lower middle cell")
+                    .symbol()
+            })
+            .collect::<String>();
+        let bottom = (0..60)
+            .map(|column| buffer.cell((column, 4)).expect("bottom cell").symbol())
             .collect::<String>();
 
-        assert!(title.contains("OMARCHY DESK"));
-        assert!(status.contains("1 of 1 devices ready"));
+        assert!(top.contains("╱╲"));
+        assert!(middle.contains("╱──╲   OMARCHY DESK"));
+        assert!(lower_middle.contains("╲──╱"));
+        assert!(lower_middle.contains("1 of 1 devices ready"));
+        assert!(bottom.contains("╲╱"));
     }
 
     #[test]

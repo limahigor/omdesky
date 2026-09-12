@@ -4,13 +4,15 @@ use omdesk_application::ports::MeshNetwork;
 use omdesk_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{Config, access_path, state_dir, sunshine_config_path, sunshine_credentials_path},
+    config::{
+        Config, access_path, legacy_sunshine_credentials_path, state_dir, sunshine_config_path,
+    },
     hyprland::HyprlandAdapter,
     identity::NodeIdentity,
     input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
     omarchy::{OmarchyNotificationAdapter, detect_version},
     process::TokioCommandRunner,
-    sunshine::SunshineAdapter,
+    sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
 use omdesk_protocol::NodeInfoResponse;
@@ -75,7 +77,7 @@ async fn main() -> Result<()> {
         runner,
         sunshine_config_path().context("resolve Sunshine configuration")?,
         omdesk_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        Some(sunshine_credentials_path()?),
+        SunshineCredentialStore::new(Some(legacy_sunshine_credentials_path()?)),
     ));
 
     let notifications = Arc::new(OmarchyNotificationAdapter::default());

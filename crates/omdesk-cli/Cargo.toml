@@ -17,6 +17,7 @@ omdesk-core = { path = "../omdesk-core" }
 omdesk-platform = { path = "../omdesk-platform" }
 omdesk-protocol = { path = "../omdesk-protocol" }
 omdesk-tui = { path = "../omdesk-tui" }
+rpassword.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
