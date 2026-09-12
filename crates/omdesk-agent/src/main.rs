@@ -19,13 +19,23 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex, RwLock},
 };
+#[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(debug_assertions)]
+fn init_debug_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+}
+
+#[cfg(not(debug_assertions))]
+fn init_debug_tracing() {}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_debug_tracing();
+
     let config = Config::load().context("load configuration")?;
     let runner = Arc::new(TokioCommandRunner);
 
@@ -102,6 +112,7 @@ async fn main() -> Result<()> {
         follow_focus: Arc::new(Mutex::new(None)),
         agent_port: config.network.agent_port,
     };
+
     let listener = tokio::net::TcpListener::bind((address, config.network.agent_port))
         .await
         .context("bind agent to Tailscale address")?;

@@ -37,8 +37,19 @@ impl FollowFocusRouter {
     }
 
     pub async fn run(self, mut signals: mpsc::Receiver<()>) {
+        let streamed = match self.controller.current_display().await {
+            Ok(display) => Some(display),
+            Err(error) => {
+                tracing::debug!(
+                    code = error.code,
+                    detail = %error.message,
+                    "follow_focus.initial_display_unavailable"
+                );
+                None
+            }
+        };
         let mut state = RoutingState {
-            streamed: self.controller.current_display().await.ok(),
+            streamed,
             pending: None,
             deadline: None,
         };
@@ -67,7 +78,11 @@ impl FollowFocusRouter {
         let topology = match self.topology.topology().await {
             Ok(topology) => topology,
             Err(error) => {
-                tracing::warn!(code = error.code, "follow_focus.topology_unavailable");
+                tracing::debug!(
+                    code = error.code,
+                    detail = %error.message,
+                    "follow_focus.topology_unavailable"
+                );
                 return;
             }
         };
@@ -105,15 +120,15 @@ impl FollowFocusRouter {
             return;
         };
 
-        tracing::info!(target_display = %target, "follow_focus.switch_committing");
+        tracing::debug!(target_display = %target, "follow_focus.switch_committing");
 
         match self.controller.switch_display(&target).await {
             Ok(()) => {
-                tracing::info!(target_display = %target, "follow_focus.switch_ok");
+                tracing::debug!(target_display = %target, "follow_focus.switch_ok");
                 state.streamed = Some(target);
             }
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     code = error.code,
                     target_display = %target,
                     message = %error.message,
@@ -123,9 +138,8 @@ impl FollowFocusRouter {
                     .notifications
                     .send(Notification {
                         summary: "Omarchy Desk".to_owned(),
-                        body: format!(
-                            "Could not follow focus to {target}; keeping current display"
-                        ),
+                        body: "The streamed display could not be changed. The current display will stay active."
+                            .to_owned(),
                     })
                     .await;
             }

@@ -35,6 +35,7 @@ impl SunshineCredentials {
         if raw.username.is_empty() || raw.password.is_empty() {
             return None;
         }
+
         Some(Self {
             username: raw.username,
             password: SecretString::from(raw.password),

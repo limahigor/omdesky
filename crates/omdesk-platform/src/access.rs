@@ -25,6 +25,7 @@ impl FileAccessStore {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
+
         read_json(&self.path).map_err(state_error)
     }
 
@@ -45,6 +46,7 @@ impl AccessStore for FileAccessStore {
         let mut controllers = self.read_all()?;
         controllers.retain(|candidate| candidate.tailnet_node_id != controller.tailnet_node_id);
         controllers.push(controller);
+
         self.write_all(&controllers)
     }
 
@@ -52,6 +54,7 @@ impl AccessStore for FileAccessStore {
         let _guard = self.lock.lock().await;
         let mut controllers = self.read_all()?;
         controllers.retain(|candidate| candidate.tailnet_node_id != tailnet_node_id);
+
         self.write_all(&controllers)
     }
 

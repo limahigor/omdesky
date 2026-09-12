@@ -93,6 +93,7 @@ impl RemoteOmarchy for HyprlandAdapter {
                 format!("name:{name}")
             }
         };
+
         self.dispatch(vec!["workspace".to_owned(), selector]).await
     }
 
@@ -104,6 +105,7 @@ impl RemoteOmarchy for HyprlandAdapter {
                 false,
             ));
         }
+
         self.dispatch(vec!["focuswindow".to_owned(), format!("address:{id}")])
             .await
     }
@@ -165,6 +167,7 @@ pub fn parse_active_window(bytes: &[u8]) -> PortResult<Option<Window>> {
     if client.address.is_empty() {
         return Ok(None);
     }
+
     Ok(Some(client_to_window(client)))
 }
 

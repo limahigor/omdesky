@@ -3,7 +3,7 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use omdesk_application::{
-    ports::{AccessStore, AgentEndpoint, AllowedController, MeshNetwork},
+    ports::{AccessStore, AgentEndpoint, AllowedController, MeshNetwork, PortError},
     services::{ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode},
 };
 use omdesk_core::{
@@ -259,6 +259,7 @@ impl AppState {
         if self.nodes.is_empty() {
             return;
         }
+
         let next = self
             .list
             .selected()
@@ -271,6 +272,7 @@ impl AppState {
         if self.nodes.is_empty() {
             return;
         }
+
         let previous = self
             .list
             .selected()
@@ -285,7 +287,7 @@ fn start_refresh(discovery: Arc<DiscoverNodes>, sender: mpsc::Sender<AsyncMessag
         let result = discovery
             .execute(false)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| user_error("Devices could not be refreshed.", &error));
         let _ = sender.send(AsyncMessage::Discovery(result)).await;
     });
 }
@@ -301,10 +303,12 @@ fn start_connect(services: &Services, node: DiscoveredNode, sender: mpsc::Sender
         .map(|config| stream_profile(&config))
         .unwrap_or_else(|_| StreamProfile::default());
     let input_mode = InputMode::Remote;
+
     tokio::spawn(async move {
         let controller_endpoint = local_agent_endpoint(agent_port)
             .await
             .unwrap_or_else(|_| endpoint.clone());
+
         let result = service
             .execute(ConnectRequest {
                 endpoint,
@@ -317,8 +321,9 @@ fn start_connect(services: &Services, node: DiscoveredNode, sender: mpsc::Sender
                 auto_pair: true,
             })
             .await
-            .map(|exit| format!("Disconnected from {} (exit {exit})", node.name))
-            .map_err(|error| error.to_string());
+            .map(|exit| stream_exit_message(&node.name, exit))
+            .map_err(|error| user_error("The connection could not be completed.", &error));
+
         let _ = sender.send(AsyncMessage::Activity(result)).await;
     });
 }
@@ -352,7 +357,7 @@ fn start_access_list(access: Arc<FileAccessStore>, sender: mpsc::Sender<AsyncMes
                     })
                     .collect()
             })
-            .map_err(|error| error.to_string());
+            .map_err(|error| user_error("The allowed devices list could not be loaded.", &error));
         let _ = sender.send(AsyncMessage::Access(result)).await;
     });
 }
@@ -365,10 +370,14 @@ fn start_access_allow(
     tokio::spawn(async move {
         if let Err(error) = access.allow(controller).await {
             let _ = sender
-                .send(AsyncMessage::Access(Err(error.to_string())))
+                .send(AsyncMessage::Access(Err(user_error(
+                    "This device could not be allowed.",
+                    &error,
+                ))))
                 .await;
             return;
         }
+
         start_access_list(access, sender);
     });
 }
@@ -381,12 +390,36 @@ fn start_access_revoke(
     tokio::spawn(async move {
         if let Err(error) = access.revoke(&tailnet_node_id).await {
             let _ = sender
-                .send(AsyncMessage::Access(Err(error.to_string())))
+                .send(AsyncMessage::Access(Err(user_error(
+                    "Access for this device could not be removed.",
+                    &error,
+                ))))
                 .await;
             return;
         }
+
         start_access_list(access, sender);
     });
+}
+
+fn user_error(context: &str, error: &PortError) -> String {
+    tracing::debug!(
+        code = error.code,
+        detail = %error.message,
+        retryable = error.retryable,
+        user_context = context,
+        "tui.operation_failed"
+    );
+    format!("{context} {}", error.user_message())
+}
+
+fn stream_exit_message(node_name: &str, exit: i32) -> String {
+    if exit == 0 {
+        format!("Disconnected from {node_name}.")
+    } else {
+        tracing::debug!(node = node_name, exit, "stream.unexpected_exit");
+        format!("The stream from {node_name} ended unexpectedly. You can try reconnecting.")
+    }
 }
 
 fn requires_terminal_reset(message: &AsyncMessage) -> bool {
@@ -399,6 +432,7 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
         AsyncMessage::Activity(result) => {
             state.activity = Activity::Idle;
             state.detail_expanded = false;
+
             match result {
                 Ok(notice) => {
                     state.notice = Some(notice);
@@ -423,6 +457,7 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
 fn apply_refresh(state: &mut AppState, result: DiscoveryResult) {
     state.loading = false;
     state.detail_expanded = false;
+
     match result {
         Ok(nodes) => {
             state.nodes = nodes;
@@ -674,8 +709,9 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let outer = centered_area(frame.area());
     let sections = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Min(14),
+        Constraint::Length(4),
+        Constraint::Min(11),
+        Constraint::Length(3),
         Constraint::Length(3),
     ])
     .split(outer);
@@ -683,6 +719,7 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     draw_header(frame, sections[0], state, &theme);
     draw_content(frame, sections[1], state, &theme);
     draw_footer(frame, sections[2], state, &theme);
+    draw_message(frame, sections[3], state, &theme);
 
     if let Some(overlay) = &state.overlay {
         draw_overlay(frame, overlay, state, &theme);
@@ -825,6 +862,7 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
                 )),
                 Line::default(),
             ];
+
             if state.access_entries.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "  (empty, any Tailnet identity may connect, per Grants)",
@@ -838,11 +876,13 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
                     )));
                 }
             }
+
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "a allow selected device    d revoke    Esc back",
                 Style::default().fg(color(theme.muted)),
             )));
+
             ("󱅣  Access allowlist ", 14, lines)
         }
     };
@@ -1054,7 +1094,6 @@ fn centered_area(area: Rect) -> Rect {
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
     let mark = color(theme.accent);
-    let screen = color(theme.success);
     let ready = state
         .nodes
         .iter()
@@ -1082,7 +1121,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
     let lines = vec![
         Line::from(vec![
             Span::styled(
-                "┏━━━┓",
+                "┃ ⬢ ┃",
                 Style::default().fg(mark).add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
@@ -1095,19 +1134,6 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
                 Style::default()
                     .fg(color(theme.foreground))
                     .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("┃ ", Style::default().fg(mark).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                "⬢",
-                Style::default().fg(screen).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ┃", Style::default().fg(mark).add_modifier(Modifier::BOLD)),
-            Span::raw("   "),
-            Span::styled(
-                "Native remote desktop for Omarchy",
-                Style::default().fg(color(theme.muted)),
             ),
         ]),
         Line::from(vec![
@@ -1157,6 +1183,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_owned()];
     }
+
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
         let mut current = String::new();
@@ -1171,11 +1198,14 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 push_word(&mut lines, &mut current, word, width);
             }
         }
+
         lines.push(current);
     }
+
     if lines.is_empty() {
         lines.push(String::new());
     }
+
     lines
 }
 
@@ -1184,6 +1214,7 @@ fn push_word(lines: &mut Vec<String>, current: &mut String, word: &str, width: u
         *current = word.to_owned();
         return;
     }
+
     let mut chunk = String::new();
     for character in word.chars() {
         if chunk.chars().count() == width {
@@ -1191,6 +1222,7 @@ fn push_word(lines: &mut Vec<String>, current: &mut String, word: &str, width: u
         }
         chunk.push(character);
     }
+
     *current = chunk;
 }
 
@@ -1211,7 +1243,7 @@ fn draw_devices(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         .map(|node| device_item(node, theme))
         .collect::<Vec<_>>();
     let list = List::new(items)
-        .block(titled_panel("󰇄  Devices", theme))
+        .block(titled_panel("󰇄  Devices", theme).padding(Padding::new(1, 1, 1, 0)))
         .highlight_symbol(" ")
         .highlight_style(
             Style::default()
@@ -1221,22 +1253,23 @@ fn draw_devices(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
         );
 
     frame.render_stateful_widget(list, area, &mut state.list);
-    draw_selection_bar(frame, area, state, theme);
+    draw_selection(frame, area, state, theme);
 }
 
 const DEVICE_ITEM_HEIGHT: u16 = 4;
 
-fn draw_selection_bar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
+fn draw_selection(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
     let Some(selected) = state.list.selected() else {
         return;
     };
+
     let offset = state.list.offset();
     if selected < offset {
         return;
     }
 
     let bar_x = area.x + 2;
-    let inner_top = area.y + 1;
+    let inner_top = area.y + 2;
     let inner_bottom = area.y + area.height.saturating_sub(1);
     let rel = (selected - offset) as u16;
     let y_start = inner_top + rel * DEVICE_ITEM_HEIGHT;
@@ -1250,6 +1283,7 @@ fn draw_selection_bar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme
         if y >= inner_bottom {
             break;
         }
+
         if let Some(cell) = buffer.cell_mut((bar_x, y)) {
             cell.set_symbol("▌");
             cell.set_fg(accent);
@@ -1264,11 +1298,13 @@ fn device_item(node: &DiscoveredNode, theme: &OmarchyTheme) -> ListItem<'static>
     } else {
         node.name.clone()
     };
+
     let foreground = if node.is_local {
         theme.muted
     } else {
         theme.foreground
     };
+
     let latency = node
         .latency_ms
         .map_or_else(|| "—".to_owned(), |value| format!("{value} ms"));
@@ -1347,10 +1383,11 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
                 )),
             ]
         },
-        |node| detail_lines(node, state, theme, inner_width),
+        |node| detail_lines(node, theme, inner_width),
     );
 
     let available = area.height.saturating_sub(2) as usize;
+
     state.detail_overflow = lines.len() > available;
     if state.detail_overflow && !state.detail_expanded {
         lines.truncate(available.saturating_sub(1));
@@ -1370,17 +1407,13 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: 
     }
 }
 
-fn detail_lines(
-    node: &DiscoveredNode,
-    state: &AppState,
-    theme: &OmarchyTheme,
-    width: usize,
-) -> Vec<Line<'static>> {
+fn detail_lines(node: &DiscoveredNode, theme: &OmarchyTheme, width: usize) -> Vec<Line<'static>> {
     let capabilities = if node.capabilities.as_slice().is_empty() {
         "Not advertised".to_owned()
     } else {
         node.capabilities.as_slice().join(", ")
     };
+
     let mut lines = vec![Line::default()];
     lines.extend(styled_wrapped_lines(
         &node.name,
@@ -1440,35 +1473,6 @@ fn detail_lines(
         width,
         Style::default().fg(color(theme.foreground)),
     ));
-
-    if let Some(reason) = state.unavailable_reason() {
-        lines.push(Line::default());
-        lines.extend(styled_wrapped_lines(
-            reason,
-            width,
-            Style::default().fg(color(theme.muted)),
-        ));
-    }
-
-    if let Some((kind, message)) = state.message() {
-        lines.push(Line::default());
-        let (title, accent) = match kind {
-            MessageKind::Error => ("ERROR", theme.error),
-            MessageKind::Notice => ("MESSAGE", theme.success),
-        };
-        lines.extend(styled_wrapped_lines(
-            title,
-            width,
-            Style::default()
-                .fg(color(accent))
-                .add_modifier(Modifier::BOLD),
-        ));
-        lines.extend(styled_wrapped_lines(
-            message,
-            width,
-            Style::default().fg(color(accent)),
-        ));
-    }
 
     lines
 }
@@ -1547,6 +1551,33 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
             .block(panel(theme)),
         area,
     );
+}
+
+fn draw_message(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &OmarchyTheme) {
+    let line = state
+        .message()
+        .map(|(kind, message)| message_line(kind, message, theme))
+        .unwrap_or_default();
+
+    frame.render_widget(Paragraph::new(line).block(panel(theme)), area);
+}
+
+fn message_line(kind: MessageKind, message: &str, theme: &OmarchyTheme) -> Line<'static> {
+    let (title, accent) = match kind {
+        MessageKind::Notice => (" INFO ", theme.success),
+        MessageKind::Error => (" ERROR ", theme.error),
+    };
+
+    Line::from(vec![
+        Span::styled(
+            title,
+            Style::default()
+                .fg(color(theme.background))
+                .bg(color(accent))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" | {message}"), Style::default().fg(color(accent))),
+    ])
 }
 
 fn key(value: &'static str, theme: &OmarchyTheme) -> Span<'static> {
@@ -1666,6 +1697,7 @@ fn color(value: Rgb) -> Color {
 mod tests {
     use super::*;
     use omdesk_core::NodeCapabilities;
+    use ratatui::{Terminal, backend::TestBackend};
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -1699,10 +1731,122 @@ mod tests {
         apply_refresh(&mut state, Ok(vec![selected]));
         let theme = state.theme.current().clone();
 
-        let lines = detail_lines(state.selected().expect("selected node"), &state, &theme, 18);
+        let lines = detail_lines(state.selected().expect("selected node"), &theme, 18);
 
         assert!(lines.len() > 12);
         assert!(lines.iter().all(|line| line.width() <= 18));
+    }
+
+    #[test]
+    fn test_selected_device_background_and_accent_have_equal_height() {
+        let mut state = state();
+        apply_refresh(&mut state, Ok(vec![node("workstation"), node("notebook")]));
+        let theme = state.theme.current().clone();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_devices(frame, frame.area(), &mut state, &theme))
+            .expect("draw devices");
+
+        let buffer = terminal.backend().buffer();
+        for row in 2..2 + DEVICE_ITEM_HEIGHT {
+            assert_eq!(
+                buffer.cell((2, row)).expect("accent").bg,
+                color(theme.selection)
+            );
+            assert_eq!(
+                buffer.cell((3, row)).expect("background").bg,
+                color(theme.selection)
+            );
+        }
+        assert_eq!(
+            buffer.cell((8, 3)).expect("centered device name").symbol(),
+            "w"
+        );
+        assert_eq!(buffer.cell((3, 2)).expect("top spacing").symbol(), " ");
+        assert_eq!(buffer.cell((3, 5)).expect("bottom spacing").symbol(), " ");
+        assert_eq!(
+            buffer
+                .cell((3, 2 + DEVICE_ITEM_HEIGHT))
+                .expect("next device")
+                .bg,
+            color(theme.background)
+        );
+    }
+
+    #[test]
+    fn test_header_keeps_title_and_status_on_adjacent_lines() {
+        let mut state = state();
+        apply_refresh(&mut state, Ok(vec![node("workstation")]));
+        let theme = state.theme.current().clone();
+        let backend = TestBackend::new(60, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state, &theme))
+            .expect("draw header");
+
+        let buffer = terminal.backend().buffer();
+        let title = (0..60)
+            .map(|column| buffer.cell((column, 1)).expect("title cell").symbol())
+            .collect::<String>();
+        let status = (0..60)
+            .map(|column| buffer.cell((column, 2)).expect("status cell").symbol())
+            .collect::<String>();
+
+        assert!(title.contains("OMARCHY DESK"));
+        assert!(status.contains("1 of 1 devices ready"));
+    }
+
+    #[test]
+    fn test_message_line_uses_info_badge_and_success_colors() {
+        let theme = OmarchyTheme::default();
+
+        let line = message_line(MessageKind::Notice, "Connected", &theme);
+
+        assert_eq!(line.to_string(), " INFO  | Connected");
+        assert_eq!(line.spans[0].style.fg, Some(color(theme.background)));
+        assert_eq!(line.spans[0].style.bg, Some(color(theme.success)));
+        assert_eq!(line.spans[1].style.fg, Some(color(theme.success)));
+    }
+
+    #[test]
+    fn test_message_line_uses_error_badge_and_error_colors() {
+        let theme = OmarchyTheme::default();
+
+        let line = message_line(MessageKind::Error, "Connection failed", &theme);
+
+        assert_eq!(line.to_string(), " ERROR  | Connection failed");
+        assert_eq!(line.spans[0].style.fg, Some(color(theme.background)));
+        assert_eq!(line.spans[0].style.bg, Some(color(theme.error)));
+        assert_eq!(line.spans[1].style.fg, Some(color(theme.error)));
+    }
+
+    #[test]
+    fn test_user_error_adds_context_without_exposing_details() {
+        let error = PortError::new(
+            "AGENT_UNREACHABLE",
+            "request to http://100.64.0.7:48155 failed",
+            true,
+        );
+
+        let message = user_error("The connection could not be completed.", &error);
+
+        assert_eq!(
+            message,
+            "The connection could not be completed. This device could not be reached. Check that it is online and connected to Tailscale."
+        );
+        assert!(!message.contains("100.64.0.7"));
+    }
+
+    #[test]
+    fn test_stream_exit_message_hides_process_exit_code() {
+        assert_eq!(
+            stream_exit_message("workstation", 1),
+            "The stream from workstation ended unexpectedly. You can try reconnecting."
+        );
+        assert!(!stream_exit_message("workstation", 1).contains("exit 1"));
     }
 
     #[test]

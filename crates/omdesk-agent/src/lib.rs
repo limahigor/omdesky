@@ -84,6 +84,7 @@ fn start_follow_focus(state: &AgentState, controller: AgentEndpoint) {
     let router = tokio::spawn(router.run(receiver));
 
     let session = FollowFocusSession { source, router };
+
     if let Ok(mut guard) = state.follow_focus.lock()
         && let Some(previous) = guard.replace(session)
     {
@@ -272,15 +273,7 @@ async fn run_command(
                     "controller.switch_display.received"
                 );
 
-                let _ = state
-                    .notifications
-                    .send(Notification {
-                        summary: "Omarchy Desk (debug)".to_owned(),
-                        body: format!(
-                            "switch_display recebido de {} pedindo {}",
-                            remote_endpoint.address, target
-                        ),
-                    })
+                send_debug_notification(&state, format!("Display switch requested for {target}"))
                     .await;
 
                 let displays = state.agent_client.displays(&remote_endpoint).await?;
@@ -298,19 +291,10 @@ async fn run_command(
                 let outcome = state.commands.execute(shortcut).await;
 
                 let body = match &outcome {
-                    Ok(()) => format!("shortcut Moonlight enviado para {target}"),
-                    Err(error) => format!(
-                        "falha ao executar shortcut ({}): {}",
-                        error.code, error.message
-                    ),
+                    Ok(()) => format!("Display switch sent for {target}"),
+                    Err(_) => format!("Display switch failed for {target}"),
                 };
-                let _ = state
-                    .notifications
-                    .send(Notification {
-                        summary: "Omarchy Desk (debug)".to_owned(),
-                        body,
-                    })
-                    .await;
+                send_debug_notification(&state, body).await;
 
                 outcome?;
 
@@ -332,10 +316,27 @@ async fn run_command(
     }
 }
 
+#[cfg(debug_assertions)]
+async fn send_debug_notification(state: &AgentState, body: String) {
+    if let Err(error) = state
+        .notifications
+        .send(Notification {
+            summary: "Omarchy Desk debug".to_owned(),
+            body,
+        })
+        .await
+    {
+        tracing::debug!(code = error.code, detail = %error.message, "notification.debug_failed");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn send_debug_notification(_state: &AgentState, _body: String) {}
+
 fn controller_command_notification(command: &RemoteCommand) -> Option<Notification> {
     let body = match command {
-        RemoteCommand::SendShortcut { .. } => "toggle remote shortcut capture",
-        RemoteCommand::CloseWindow { .. } => "close remote session",
+        RemoteCommand::SendShortcut { .. } => "Remote shortcut capture changed",
+        RemoteCommand::CloseWindow { .. } => "The remote session was closed",
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
         | RemoteCommand::DetachSession => return None,
@@ -431,7 +432,13 @@ fn domain_error(error: DomainError) -> ApiError {
         _ => "INVALID_COMMAND",
     };
 
-    ApiError::new(StatusCode::BAD_REQUEST, code, error.to_string(), false)
+    tracing::debug!(code, detail = %error, "request.validation_failed");
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        code,
+        "The requested action is not valid.",
+        false,
+    )
 }
 
 fn validate_workspace_target(target: &WorkspaceTarget) -> Result<(), ApiError> {
@@ -441,10 +448,11 @@ fn validate_workspace_target(target: &WorkspaceTarget) -> Result<(), ApiError> {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "WORKSPACE_NOT_FOUND",
-            "workspace name is not a safe selector",
+            "The requested workspace name is not valid.",
             false,
         ));
     }
+
     Ok(())
 }
 
@@ -491,7 +499,7 @@ fn unauthorized() -> ApiError {
     ApiError::new(
         StatusCode::UNAUTHORIZED,
         "UNAUTHORIZED",
-        "caller is not an authorized Tailscale identity",
+        "This device is not allowed to control Omarchy Desk.",
         false,
     )
 }
@@ -535,7 +543,15 @@ impl From<omdesk_application::ports::PortError> for ApiError {
             "SUNSHINE_PAIRING_FAILED" => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        ApiError::new(status, error.code, error.message, error.retryable)
+
+        tracing::debug!(
+            code = error.code,
+            detail = %error.message,
+            retryable = error.retryable,
+            "request.port_error"
+        );
+
+        ApiError::new(status, error.code, error.user_message(), error.retryable)
     }
 }
 
@@ -565,7 +581,7 @@ mod tests {
             controller_command_notification(&command),
             Some(Notification {
                 summary: "Omarchy Desk".to_owned(),
-                body: "toggle remote shortcut capture".to_owned(),
+                body: "Remote shortcut capture changed".to_owned(),
             })
         );
     }
@@ -580,7 +596,7 @@ mod tests {
             controller_command_notification(&command),
             Some(Notification {
                 summary: "Omarchy Desk".to_owned(),
-                body: "close remote session".to_owned(),
+                body: "The remote session was closed".to_owned(),
             })
         );
     }
@@ -599,5 +615,21 @@ mod tests {
             display: omdesk_core::DisplayId::from("DP-2"),
         };
         assert_eq!(controller_command_notification(&command), None);
+    }
+
+    #[test]
+    fn test_port_error_response_hides_internal_details() {
+        let response = ApiError::from(omdesk_application::ports::PortError::new(
+            "HYPRLAND_UNAVAILABLE",
+            "hyprctl exited with status 1: socket path /run/user/1000/hypr/private",
+            true,
+        ));
+
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.envelope.error.message,
+            "The desktop could not be controlled. Make sure Hyprland is running."
+        );
+        assert!(!response.envelope.error.message.contains("/run/user"));
     }
 }

@@ -12,8 +12,7 @@ use time::OffsetDateTime;
 
 pub type PortResult<T> = Result<T, PortError>;
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("{code}: {message}")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PortError {
     pub code: &'static str,
     pub message: String,
@@ -22,13 +21,92 @@ pub struct PortError {
 
 impl PortError {
     pub fn new(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
+        let message = message.into();
+
+        tracing::debug!(code, retryable, detail = %message, "operation.failed");
+
         Self {
             code,
-            message: message.into(),
+            message,
             retryable,
         }
     }
+
+    pub fn user_message(&self) -> &str {
+        match self.code {
+            "AGENT_UNREACHABLE" | "PEER_OFFLINE" => {
+                "This device could not be reached. Check that it is online and connected to Tailscale."
+            }
+            "AGENT_PROTOCOL_INVALID" => {
+                "This device sent an unexpected response. Make sure Omarchy Desk is up to date on both devices."
+            }
+            "AGENT_REQUEST_FAILED" => {
+                "The other device could not complete the request. Please try again."
+            }
+            "UNAUTHORIZED" => {
+                "This device is not allowed to connect. Add it to the allowed controllers first."
+            }
+            "HYPRLAND_UNAVAILABLE" | "HYPRLAND_DISPATCH_FAILED" => {
+                "The desktop could not be controlled. Make sure Hyprland is running."
+            }
+            "HYPRLAND_TARGET_MISSING" | "WINDOW_NOT_FOUND" => {
+                "The requested window is no longer available."
+            }
+            "WORKSPACE_NOT_FOUND" => "The requested workspace could not be found.",
+            "DISPLAY_NOT_FOUND" | "DISPLAY_SWITCH_FAILED" => {
+                "The requested display is not available for streaming."
+            }
+            "SUNSHINE_NOT_INSTALLED" => {
+                "Sunshine is not installed on the device you are trying to connect to."
+            }
+            "SUNSHINE_NOT_RUNNING" => {
+                "Sunshine is not running on the device you are trying to connect to."
+            }
+            "SUNSHINE_NOT_READY" => {
+                "The other device is not ready to stream yet. Check Sunshine and try again."
+            }
+            "SUNSHINE_API_UNAVAILABLE" => {
+                "Sunshine needs to be configured on the other device before pairing."
+            }
+            "SUNSHINE_PAIRING_FAILED" | "MOONLIGHT_PAIRING_FAILED" => {
+                "The devices could not be paired. Check Sunshine and try again."
+            }
+            "MOONLIGHT_PAIRING_REQUIRED" => {
+                "This device is not paired yet. Run `omdesk pair` first."
+            }
+            "MOONLIGHT_NOT_INSTALLED" => "Moonlight is not installed on this device.",
+            "STREAM_START_FAILED" => {
+                "The stream could not be started. Check Moonlight and try again."
+            }
+            "ACCESS_STORE_FAILED" => {
+                "The allowed devices list could not be updated. Check its file permissions."
+            }
+            "OMARCHY_UNSUPPORTED_VERSION" => {
+                "This Omarchy version is not supported. Omarchy 4 is required."
+            }
+            "OMARCHY_VERSION_UNKNOWN" => "The installed Omarchy version could not be detected.",
+            "COMMAND_TIMED_OUT" => "The operation took too long. Please try again.",
+            "COMMAND_NOT_AVAILABLE" => {
+                "A required program is not installed or could not be started."
+            }
+            "INVALID_COMMAND" | "COMMAND_NOT_EXECUTABLE" | "INVALID_SESSION_TRANSITION" => {
+                "This action is not available right now."
+            }
+            "LAUNCHER_IO_FAILED" => {
+                "The desktop shortcut could not be updated. Check the file permissions."
+            }
+            _ => "Omarchy Desk could not complete the operation. Please try again.",
+        }
+    }
 }
+
+impl std::fmt::Display for PortError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.user_message())
+    }
+}
+
+impl std::error::Error for PortError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshNodeIdentity {
@@ -284,4 +362,40 @@ pub trait LauncherStore: Send + Sync {
     async fn create(&self, launcher: LauncherSpec) -> PortResult<PathBuf>;
     async fn list(&self) -> PortResult<Vec<PathBuf>>;
     async fn remove(&self, node_id: NodeId) -> PortResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_error_displays_friendly_message_without_internal_details() {
+        let error = PortError::new(
+            "AGENT_UNREACHABLE",
+            "error sending request for url (http://100.64.0.7:48155/v1/node)",
+            true,
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "This device could not be reached. Check that it is online and connected to Tailscale."
+        );
+        assert!(!error.to_string().contains("100.64.0.7"));
+        assert_eq!(
+            error.message,
+            "error sending request for url (http://100.64.0.7:48155/v1/node)"
+        );
+    }
+
+    #[test]
+    fn test_unknown_port_error_has_safe_fallback() {
+        let error = PortError::new("PRIVATE_BACKEND_FAILURE", "secret backend detail", false);
+
+        assert_eq!(
+            error.to_string(),
+            "Omarchy Desk could not complete the operation. Please try again."
+        );
+        assert!(!error.to_string().contains("PRIVATE_BACKEND_FAILURE"));
+        assert!(!error.to_string().contains("secret backend detail"));
+    }
 }

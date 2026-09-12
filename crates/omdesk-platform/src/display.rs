@@ -90,7 +90,7 @@ impl StreamDisplayController for MoonlightDisplayController {
             .validate()
             .map_err(|error| PortError::new("INVALID_COMMAND", error.to_string(), false))?;
 
-        tracing::info!(
+        tracing::debug!(
             display_id = %target,
             controller = %self.controller.address,
             "moonlight.switch_display.request"
@@ -149,14 +149,21 @@ pub fn spawn_focus_signals(sender: mpsc::Sender<()>) -> JoinHandle<()> {
     tokio::spawn(async move {
         match event_socket_path() {
             Some(path) => {
-                tracing::info!(path = %path.display(), "follow_focus.hyprland_socket_connected");
-                if forward_socket_events(&path, &sender).await.is_err() {
-                    tracing::warn!("follow_focus.hyprland_socket_lost");
+                tracing::debug!(
+                    path = %path.display(),
+                    "follow_focus.hyprland_socket_connected"
+                );
+                if let Err(error) = forward_socket_events(&path, &sender).await {
+                    tracing::debug!(
+                        path = %path.display(),
+                        detail = %error,
+                        "follow_focus.hyprland_socket_lost"
+                    );
                     poll_focus(&sender).await;
                 }
             }
             None => {
-                tracing::info!("follow_focus.polling_fallback");
+                tracing::debug!("follow_focus.polling_fallback");
                 poll_focus(&sender).await;
             }
         }
@@ -201,6 +208,7 @@ fn is_focus_event(line: &str) -> bool {
 
 async fn poll_focus(sender: &mpsc::Sender<()>) {
     let mut ticker = interval(POLL_INTERVAL);
+
     loop {
         ticker.tick().await;
         if sender.send(()).await.is_err() {

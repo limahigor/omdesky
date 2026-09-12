@@ -48,6 +48,7 @@ pub fn parse_package_version(output: &str) -> PortResult<OmarchyVersion> {
             false,
         ));
     }
+
     Ok(parsed)
 }
 
@@ -58,6 +59,7 @@ pub async fn detect_version(runner: &dyn CommandRunner) -> PortResult<OmarchyVer
             ["-Q".to_owned(), "omarchy".to_owned()],
         ))
         .await?;
+
     parse_package_version(&String::from_utf8_lossy(&output.stdout))
 }
 

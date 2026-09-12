@@ -33,9 +33,11 @@ impl LauncherStore for DesktopLauncherStore {
         fs::create_dir_all(&self.directory).map_err(io_error)?;
         let path = self.path(launcher.node_id);
         let content = Self::render(&launcher);
+
         if fs::read_to_string(&path).ok().as_deref() != Some(&content) {
             fs::write(&path, content).map_err(io_error)?;
         }
+
         Ok(path)
     }
 
@@ -43,6 +45,7 @@ impl LauncherStore for DesktopLauncherStore {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
+
         let mut entries = fs::read_dir(&self.directory)
             .map_err(io_error)?
             .filter_map(Result::ok)
@@ -54,6 +57,7 @@ impl LauncherStore for DesktopLauncherStore {
             })
             .collect::<Vec<_>>();
         entries.sort();
+
         Ok(entries)
     }
 
@@ -62,6 +66,7 @@ impl LauncherStore for DesktopLauncherStore {
         if path.exists() {
             fs::remove_file(path).map_err(io_error)?;
         }
+
         Ok(())
     }
 }

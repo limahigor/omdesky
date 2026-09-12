@@ -52,6 +52,7 @@ impl NodeAlias {
         if trimmed.is_empty() || trimmed.len() > 64 {
             return Err(DomainError::InvalidNodeAlias);
         }
+
         Ok(Self(trimmed.to_owned()))
     }
 
@@ -89,6 +90,7 @@ impl NodeCapabilities {
         let mut capabilities: Vec<_> = capabilities.into_iter().collect();
         capabilities.sort();
         capabilities.dedup();
+
         Self(capabilities)
     }
 
@@ -158,6 +160,7 @@ impl DisplayId {
         if value.is_empty() || value.len() > 64 {
             return Err(DomainError::InvalidDisplayId);
         }
+
         if value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))

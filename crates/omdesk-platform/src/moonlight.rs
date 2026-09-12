@@ -145,6 +145,7 @@ pub fn extract_pin(line: &str) -> Option<String> {
         .skip_while(|c| !c.is_ascii_digit())
         .take_while(|c| c.is_ascii_digit())
         .collect();
+
     (digits.len() == 4).then_some(digits)
 }
 

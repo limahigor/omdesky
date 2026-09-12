@@ -44,7 +44,9 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+
         fs::write(path, toml::to_string_pretty(self)?)?;
+
         Ok(())
     }
 }
@@ -155,6 +157,7 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
     if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(path).join("omdesk/config.toml"));
     }
+
     Ok(home_dir()?.join(".config/omdesk/config.toml"))
 }
 
@@ -162,6 +165,7 @@ pub fn state_dir() -> Result<PathBuf, ConfigError> {
     if let Some(path) = env::var_os("XDG_STATE_HOME") {
         return Ok(PathBuf::from(path).join("omdesk"));
     }
+
     Ok(home_dir()?.join(".local/state/omdesk"))
 }
 
@@ -192,6 +196,7 @@ fn config_dir() -> Result<PathBuf, ConfigError> {
     if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(path).join("omdesk"));
     }
+
     Ok(home_dir()?.join(".config/omdesk"))
 }
 

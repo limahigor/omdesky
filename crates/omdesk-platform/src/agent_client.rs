@@ -42,10 +42,14 @@ impl HttpAgentClient {
             return Err(http_error(status, envelope));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|error| PortError::new("AGENT_PROTOCOL_INVALID", error.to_string(), false))
+        response.json().await.map_err(|error| {
+            tracing::debug!(%status, detail = %error, "agent.response_invalid");
+            PortError::new(
+                "AGENT_PROTOCOL_INVALID",
+                "the device returned an incompatible response",
+                false,
+            )
+        })
     }
 
     async fn get<T: DeserializeOwned>(
@@ -174,10 +178,22 @@ impl AgentClient for HttpAgentClient {
 }
 
 fn network_error(error: reqwest::Error) -> PortError {
-    PortError::new("AGENT_UNREACHABLE", error.to_string(), true)
+    tracing::debug!(
+        detail = %error,
+        timeout = error.is_timeout(),
+        "agent.request_failed"
+    );
+
+    PortError::new("AGENT_UNREACHABLE", "the device could not be reached", true)
 }
 
 fn http_error(status: StatusCode, envelope: Option<ErrorEnvelope>) -> PortError {
+    tracing::debug!(
+        %status,
+        remote_code = ?envelope.as_ref().map(|value| value.error.code.as_str()),
+        "agent.http_error"
+    );
+
     envelope.map_or_else(
         || {
             PortError::new(
@@ -205,4 +221,32 @@ fn http_error(status: StatusCode, envelope: Option<ErrorEnvelope>) -> PortError 
             PortError::new(code, envelope.error.message, envelope.error.retryable)
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omdesk_protocol::ProtocolError;
+    use serde_json::Map;
+
+    #[test]
+    fn test_http_error_keeps_public_message_user_friendly() {
+        let error = http_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(ErrorEnvelope {
+                error: ProtocolError {
+                    code: "HYPRLAND_UNAVAILABLE".to_owned(),
+                    message: "socket /run/user/1000/hypr/private is missing".to_owned(),
+                    retryable: true,
+                    details: Map::new(),
+                },
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "The desktop could not be controlled. Make sure Hyprland is running."
+        );
+        assert!(!error.to_string().contains("/run/user"));
+    }
 }

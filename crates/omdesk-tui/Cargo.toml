@@ -15,3 +15,4 @@ omdesk-protocol = { path = "../omdesk-protocol" }
 ratatui.workspace = true
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true

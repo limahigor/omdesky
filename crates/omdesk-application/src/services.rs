@@ -312,47 +312,82 @@ impl ConnectNode {
         let mut process = self.stream.launch(stream_request).await?;
 
         if request.input_mode == InputMode::Remote {
-            self.attach_session(&request).await;
-            let _ = self
-                .notifications
-                .send(Notification {
-                    summary: "Omarchy Desk".to_owned(),
-                    body: "Remote shortcuts enabled. Toggle capture with SUPER+R".to_owned(),
-                })
-                .await;
+            match self.attach_session(&request).await {
+                Ok(()) => {
+                    let _ = self
+                        .notifications
+                        .send(Notification {
+                            summary: "Omarchy Desk".to_owned(),
+                            body: "Remote shortcuts are ready. Press SUPER+R to switch shortcut capture.".to_owned(),
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        code = error.code,
+                        detail = %error.message,
+                        "session.shortcuts_setup_failed"
+                    );
+                    let _ = self
+                        .notifications
+                        .send(Notification {
+                            summary: "Omarchy Desk".to_owned(),
+                            body: "The stream started, but remote shortcuts are unavailable."
+                                .to_owned(),
+                        })
+                        .await;
+                }
+            }
         }
 
         let exit = process.wait().await;
 
         if request.input_mode == InputMode::Remote {
-            self.detach_session(&request).await;
-            let _ = self
-                .notifications
-                .send(Notification {
-                    summary: "Omarchy Desk".to_owned(),
-                    body: "Stream ended; local shortcuts restored".to_owned(),
-                })
-                .await;
+            match self.detach_session(&request).await {
+                Ok(()) => {
+                    let _ = self
+                        .notifications
+                        .send(Notification {
+                            summary: "Omarchy Desk".to_owned(),
+                            body: "The stream ended and your local shortcuts were restored."
+                                .to_owned(),
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        code = error.code,
+                        detail = %error.message,
+                        "session.shortcuts_restore_failed"
+                    );
+                    let _ = self
+                        .notifications
+                        .send(Notification {
+                            summary: "Omarchy Desk".to_owned(),
+                            body: "The stream ended, but local shortcuts could not be restored. Restart Hyprland before reconnecting.".to_owned(),
+                        })
+                        .await;
+                }
+            }
         }
 
         exit
     }
 
-    async fn attach_session(&self, request: &ConnectRequest) {
-        let _ = self
-            .keybinds
+    async fn attach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+        self.keybinds
             .install(SessionKeybindConfig {
                 role: SessionRole::Controller,
                 controller: None,
             })
-            .await;
+            .await?;
 
         let controller = SessionEndpoint {
             address: request.controller_endpoint.address,
             port: request.controller_endpoint.port,
         };
 
-        let _ = self
+        if let Err(error) = self
             .agent
             .send_command(
                 &request.endpoint,
@@ -361,16 +396,23 @@ impl ConnectNode {
                     controller: Some(controller),
                 },
             )
-            .await;
+            .await
+        {
+            let _ = self.keybinds.clear().await;
+            return Err(error);
+        }
+
+        Ok(())
     }
 
-    async fn detach_session(&self, request: &ConnectRequest) {
-        let _ = self.keybinds.clear().await;
-
-        let _ = self
+    async fn detach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+        let local = self.keybinds.clear().await;
+        let remote = self
             .agent
             .send_command(&request.endpoint, RemoteCommand::DetachSession)
             .await;
+
+        local.and(remote)
     }
 }
 

@@ -62,21 +62,31 @@ impl HyprlandCommandExecutor {
     }
 
     async fn run_hyprland(&self, spec: CommandSpec) -> PortResult<Vec<u8>> {
-        tracing::debug!(program = %spec.program, args = ?spec.args, "hyprland.command.start");
+        tracing::debug!(
+            program = %spec.program,
+            argument_count = spec.args.len(),
+            "hyprland.command.start"
+        );
 
         let output = self.runner.run(spec).await.map_err(|error| {
+            tracing::debug!(
+                code = error.code,
+                detail = %error.message,
+                "hyprland.command.failed"
+            );
+
             PortError::new("HYPRLAND_UNAVAILABLE", error.message, error.retryable)
         })?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let combined = format!("{stdout}\n{stderr}");
 
-        tracing::debug!(output = %combined.trim(), "hyprland.command.output");
+        tracing::debug!(status = output.status, "hyprland.command.completed");
 
         if combined.contains("window not found") || combined.contains("not found") {
             return Err(PortError::new(
                 "HYPRLAND_TARGET_MISSING",
-                format!("Hyprland reported: {}", combined.trim()),
+                "The requested window is no longer available.",
                 false,
             ));
         }
@@ -106,13 +116,17 @@ impl HyprlandCommandExecutor {
                 Some(active_window_address(&output)?)
             }
         };
+
         let lua = timed_shortcut_lua(chord, window, previous.as_deref());
 
-        tracing::info!(
+        tracing::debug!(
             mods = %chord.modifiers_hypr(),
             key = %chord.key(),
-            window = %window.as_hypr(),
-            previous = ?previous,
+            target_kind = match window {
+                WindowSelector::ActiveWindow => "active",
+                WindowSelector::Class(_) => "class",
+            },
+            restores_focus = previous.is_some(),
             "hyprland.shortcut.dispatch"
         );
 
@@ -154,7 +168,7 @@ fn active_window_address(output: &[u8]) -> PortResult<String> {
     let value: serde_json::Value = serde_json::from_slice(output).map_err(|error| {
         PortError::new(
             "HYPRLAND_UNAVAILABLE",
-            format!("unable to parse active window: {error}"),
+            format!("Hyprland returned an invalid active window: {error}"),
             false,
         )
     })?;
@@ -165,7 +179,7 @@ fn active_window_address(output: &[u8]) -> PortResult<String> {
         .ok_or_else(|| {
             PortError::new(
                 "HYPRLAND_TARGET_MISSING",
-                "Hyprland has no valid active window",
+                "The active window is no longer available.",
                 false,
             )
         })?;
@@ -283,15 +297,14 @@ impl SessionKeybindInstaller for HyprlandSessionKeybinds {
     async fn install(&self, config: SessionKeybindConfig) -> PortResult<()> {
         let spec = install_session_keybinds_spec(config.role, config.controller.as_ref());
 
-        let _ = self.runner.run(spec).await;
-
-        Ok(())
+        self.runner.run(spec).await.map(|_| ())
     }
 
     async fn clear(&self) -> PortResult<()> {
-        let _ = self.runner.run(remove_session_keybinds_spec()).await;
-
-        Ok(())
+        self.runner
+            .run(remove_session_keybinds_spec())
+            .await
+            .map(|_| ())
     }
 }
 
@@ -352,9 +365,10 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
     }
 }
 
-fn notify(message: &str) -> String {
+#[cfg(debug_assertions)]
+fn debug_notify(message: &str) -> String {
     format!(
-        "hl.dispatch(hl.dsp.exec_cmd(\"omarchy-notification-send 'Omarchy Desk' '{message}'\"))"
+        "hl.dispatch(hl.dsp.exec_cmd(\"omarchy-notification-send 'Omarchy Desk debug' '{message}'\"))"
     )
 }
 
@@ -380,18 +394,25 @@ hl.timer(function() hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key 
         | RemoteCommand::AttachSession { .. }
         | RemoteCommand::DetachSession => return None,
     };
-    let notify = notify(bind.description);
+    #[cfg(debug_assertions)]
+    return Some(format!(
+        "function() ({action})(); {} end",
+        debug_notify(bind.description)
+    ));
 
-    Some(format!("function() ({action})(); {notify} end"))
+    #[cfg(not(debug_assertions))]
+    Some(action)
 }
 
 fn remote_action_lua(bind: &Keybind, controller: &AgentEndpoint) -> Option<String> {
     let invocation = command_cli_invocation(&bind.command, controller)?;
+    #[cfg(debug_assertions)]
     let shell = format!(
-        "log=\\\"${{XDG_RUNTIME_DIR:-/tmp}}/omdesk-keybind.log\\\"; \
-{invocation} >\\\"$log\\\" 2>&1 || \
-omarchy-notification-send 'Omarchy Desk' \\\"Omarchy Desk failed: $(cat \\\"$log\\\")\\\""
+        "{invocation} >/dev/null 2>&1 || \
+omarchy-notification-send 'Omarchy Desk debug' 'Could not send the remote shortcut'"
     );
+    #[cfg(not(debug_assertions))]
+    let shell = format!("{invocation} >/dev/null 2>&1");
 
     Some(format!("hl.dsp.exec_cmd(\"{shell}\")"))
 }
@@ -529,7 +550,7 @@ mod tests {
         assert!(!spec.args[1].contains("key = \"Super_L\""));
         assert!(!spec.args[1].contains("hl.dsp.send_shortcut"));
         assert!(!spec.args[1].contains("omdesk command"));
-        assert!(spec.args[1].contains("omarchy-notification-send 'Omarchy Desk'"));
+        assert!(spec.args[1].contains("omarchy-notification-send 'Omarchy Desk debug'"));
         assert!(spec.args[1].contains("allow_input_capture = false"));
         assert!(!spec.args[1].contains("allow_input_capture = true"));
     }
@@ -548,18 +569,45 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_bind_forwards_to_controller_with_diagnostic_notify() {
+    fn test_remote_bind_forwards_to_controller_with_debug_only_notification() {
         let spec = install_session_keybinds_spec(SessionRole::Remote, Some(&controller()));
 
         assert!(spec.args[1].contains("SUPER + R"));
         assert!(spec.args[1].contains("omdesk command send-shortcut 100.64.0.7 --port 8765"));
         assert!(spec.args[1].contains("--mods 'CTRL ALT SHIFT' --key Z"));
         assert!(spec.args[1].contains("--window-class com.moonlight_stream.Moonlight"));
-        assert!(!spec.args[1].contains("&& omarchy-notification-send 'Omarchy Desk'"));
-        assert!(spec.args[1].contains("|| omarchy-notification-send 'Omarchy Desk'"));
+        assert!(spec.args[1].contains("omarchy-notification-send 'Omarchy Desk debug'"));
+        assert!(spec.args[1].contains("Could not send the remote shortcut"));
+        assert!(!spec.args[1].contains("$(cat"));
+        assert!(!spec.args[1].contains("omdesk-keybind.log"));
         assert!(spec.args[1].contains("allow_input_capture = true"));
         assert!(!spec.args[1].contains("allow_input_capture = false"));
-        assert!(spec.args[1].contains("${XDG_RUNTIME_DIR:-/tmp}/omdesk-keybind.log"));
+    }
+
+    #[tokio::test]
+    async fn test_install_propagates_keybind_failure() {
+        let runner = Arc::new(ScriptedRunner::new([failure("hyprctl unavailable")]));
+        let keybinds = HyprlandSessionKeybinds::new(runner);
+
+        let error = keybinds
+            .install(SessionKeybindConfig {
+                role: SessionRole::Controller,
+                controller: None,
+            })
+            .await
+            .expect_err("installation fails");
+
+        assert_eq!(error.message, "hyprctl unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_clear_propagates_keybind_failure() {
+        let runner = Arc::new(ScriptedRunner::new([failure("hyprctl unavailable")]));
+        let keybinds = HyprlandSessionKeybinds::new(runner);
+
+        let error = keybinds.clear().await.expect_err("cleanup fails");
+
+        assert_eq!(error.message, "hyprctl unavailable");
     }
 
     #[test]

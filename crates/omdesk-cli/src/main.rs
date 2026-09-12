@@ -31,6 +31,7 @@ use omdesk_protocol::SunshinePairRequest;
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
+#[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -230,12 +231,20 @@ enum LauncherCommand {
     Remove { target: String },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(debug_assertions)]
+fn init_debug_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(not(debug_assertions))]
+fn init_debug_tracing() {}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_debug_tracing();
 
     let cli = Cli::parse();
 
@@ -295,6 +304,7 @@ async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
             );
         }
     }
+
     Ok(())
 }
 
@@ -320,6 +330,7 @@ async fn info(target: &str, json: bool) -> Result<()> {
             );
         }
     }
+
     Ok(())
 }
 
@@ -338,6 +349,7 @@ async fn displays(target: &str, json: bool) -> Result<()> {
             );
         }
     }
+
     Ok(())
 }
 
@@ -365,6 +377,7 @@ async fn workspaces(target: &str, json: bool) -> Result<()> {
             }
         }
     }
+
     Ok(())
 }
 
@@ -401,6 +414,7 @@ async fn windows(
             );
         }
     }
+
     Ok(())
 }
 
@@ -508,6 +522,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     if args.json {
         println!("{}", json!({"exit_status": exit}));
     }
+
     Ok(())
 }
 
@@ -579,6 +594,7 @@ async fn disconnect() -> Result<()> {
     if let Ok(path) = runtime_session_path() {
         let _ = std::fs::remove_file(path);
     }
+
     Ok(())
 }
 
@@ -613,6 +629,7 @@ async fn access(command: AccessCommand) -> Result<()> {
             println!("Revoked {peer}");
         }
     }
+
     Ok(())
 }
 
@@ -646,8 +663,7 @@ async fn doctor(json: bool) -> Result<()> {
         "tailscale": check(&tailscale),
         "hyprland": check(&hyprland),
         "sunshine": check(&sunshine),
-        "sunshine_pairing": sunshine_pairing,
-        "syncthing": {"status": "SKIP", "message": "optional integration disabled"}
+        "sunshine_pairing": sunshine_pairing
     });
 
     if json {
@@ -661,6 +677,7 @@ async fn doctor(json: bool) -> Result<()> {
             );
         }
     }
+
     Ok(())
 }
 
@@ -699,6 +716,7 @@ async fn launcher(command: LauncherCommand) -> Result<()> {
             store.remove(NodeId::from_str(&target)?).await?;
         }
     }
+
     Ok(())
 }
 
@@ -753,10 +771,13 @@ fn provision_sunshine_credentials() -> Result<()> {
 
 fn prompt(label: &str) -> Result<String> {
     use std::io::Write;
+
     print!("{label}");
     std::io::stdout().flush()?;
+
     let mut value = String::new();
     std::io::stdin().read_line(&mut value)?;
+
     Ok(value.trim().to_owned())
 }
 
@@ -921,6 +942,7 @@ fn write_session(path: Option<&std::path::Path>, node: &str, input_mode: InputMo
     let Some(path) = path else {
         return;
     };
+
     let record = json!({
         "session_id": uuid_like(),
         "remote_node": node,
@@ -931,6 +953,7 @@ fn write_session(path: Option<&std::path::Path>, node: &str, input_mode: InputMo
         },
         "started_at": OffsetDateTime::now_utc().unix_timestamp(),
     });
+
     let _ = omdesk_platform::state::atomic_write_json(path, &record, false);
 }
 
