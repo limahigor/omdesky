@@ -1,7 +1,7 @@
 use crate::ports::{
-    AgentClient, AgentEndpoint, MeshNetwork, Notification, NotificationService, PairingState,
-    PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller, StreamClient,
-    StreamHostDescriptor, StreamLaunchRequest,
+    AgentClient, AgentEndpoint, ChildProcess, MeshNetwork, Notification, NotificationService,
+    PairingState, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
+    StreamClient, StreamHostDescriptor, StreamLaunchRequest,
 };
 use omdesk_core::{
     ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
@@ -9,7 +9,7 @@ use omdesk_core::{
 };
 use omdesk_protocol::{PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
-use std::{net::IpAddr, sync::Arc, time::Instant};
+use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DiscoveredNode {
@@ -321,7 +321,13 @@ impl ConnectNode {
             input_mode: request.input_mode,
         };
 
-        let mut process = self.stream.launch(stream_request).await?;
+        verify_agents(
+            self.agent.as_ref(),
+            &request.controller_endpoint,
+            &request.endpoint,
+        )
+        .await?;
+        let process = self.stream.launch(stream_request).await?;
 
         if request.input_mode == InputMode::Remote {
             match self.attach_session(&request).await {
@@ -354,7 +360,15 @@ impl ConnectNode {
 
         on_started().await;
 
-        let exit = process.wait().await;
+        let exit = wait_for_process_or_monitor(
+            process,
+            monitor_agents(
+                self.agent.clone(),
+                request.controller_endpoint.clone(),
+                request.endpoint.clone(),
+            ),
+        )
+        .await;
 
         if request.input_mode == InputMode::Remote {
             match self.detach_session(&request).await {
@@ -430,6 +444,128 @@ impl ConnectNode {
     }
 }
 
+const AGENT_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const AGENT_HEALTH_FAILURE_LIMIT: u8 = 2;
+
+fn agent_health_failure(
+    local_failures: u8,
+    remote_failures: u8,
+    failure_limit: u8,
+) -> Option<PortError> {
+    if local_failures >= failure_limit {
+        Some(PortError::new(
+            "LOCAL_AGENT_UNAVAILABLE",
+            "the local omdesk-agent stopped responding",
+            true,
+        ))
+    } else if remote_failures >= failure_limit {
+        Some(PortError::new(
+            "REMOTE_AGENT_UNAVAILABLE",
+            "the remote omdesk-agent stopped responding",
+            true,
+        ))
+    } else {
+        None
+    }
+}
+
+async fn verify_agents(
+    agent: &dyn AgentClient,
+    local: &AgentEndpoint,
+    remote: &AgentEndpoint,
+) -> PortResult<()> {
+    let (local_result, remote_result) = tokio::join!(agent.health(local), agent.health(remote));
+
+    match agent_health_failure(
+        u8::from(local_result.is_err()),
+        u8::from(remote_result.is_err()),
+        1,
+    ) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn monitor_agents(
+    agent: Arc<dyn AgentClient>,
+    local: AgentEndpoint,
+    remote: AgentEndpoint,
+) -> PortError {
+    let mut interval = tokio::time::interval(AGENT_HEALTH_INTERVAL);
+    let mut local_failures = 0;
+    let mut remote_failures = 0;
+    interval.tick().await;
+
+    loop {
+        interval.tick().await;
+        let (local_result, remote_result) =
+            tokio::join!(agent.health(&local), agent.health(&remote));
+        local_failures = if local_result.is_ok() {
+            0
+        } else {
+            local_failures + 1
+        };
+        remote_failures = if remote_result.is_ok() {
+            0
+        } else {
+            remote_failures + 1
+        };
+
+        if let Some(error) =
+            agent_health_failure(local_failures, remote_failures, AGENT_HEALTH_FAILURE_LIMIT)
+        {
+            return error;
+        }
+    }
+}
+
+pub async fn wait_for_process_or_monitor<F>(
+    mut process: Box<dyn ChildProcess>,
+    monitor: F,
+) -> PortResult<i32>
+where
+    F: Future<Output = PortError>,
+{
+    tokio::pin!(monitor);
+
+    tokio::select! {
+        exit = process.wait() => exit,
+        error = &mut monitor => {
+            if let Err(terminate_error) = process.terminate().await {
+                tracing::warn!(
+                    code = terminate_error.code,
+                    detail = %terminate_error.message,
+                    "session.stream_terminate_failed"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+pub fn ensure_controller_ready(
+    local_agent_available: bool,
+    sunshine_configured: bool,
+) -> PortResult<()> {
+    if !local_agent_available {
+        return Err(PortError::new(
+            "LOCAL_AGENT_UNAVAILABLE",
+            "the local omdesk-agent is not running",
+            true,
+        ));
+    }
+
+    if !sunshine_configured {
+        return Err(PortError::new(
+            "LOCAL_SUNSHINE_UNCONFIGURED",
+            "Sunshine credentials are not configured on this controller",
+            false,
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn next_state(current: SessionState, next: SessionState) -> PortResult<SessionState> {
     current
         .transition(next)
@@ -471,6 +607,87 @@ fn generic_node(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    struct PendingProcess {
+        terminated: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::ChildProcess for PendingProcess {
+        fn id(&self) -> Option<u32> {
+            Some(42)
+        }
+
+        async fn wait(&mut self) -> PortResult<i32> {
+            std::future::pending().await
+        }
+
+        async fn terminate(&mut self) -> PortResult<()> {
+            self.terminated
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_process_or_monitor_terminates_stream_on_health_failure() {
+        let terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let process: Box<dyn crate::ports::ChildProcess> = Box::new(PendingProcess {
+            terminated: terminated.clone(),
+        });
+        let failure = PortError::new("LOCAL_AGENT_UNAVAILABLE", "agent stopped", true);
+
+        let result = wait_for_process_or_monitor(process, async { failure }).await;
+
+        assert_eq!(
+            result.expect_err("monitor failure ends session").code,
+            "LOCAL_AGENT_UNAVAILABLE"
+        );
+        assert!(terminated.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_agent_health_failure_identifies_local_agent() {
+        let error = agent_health_failure(2, 0, 2).expect("local failure");
+
+        assert_eq!(error.code, "LOCAL_AGENT_UNAVAILABLE");
+    }
+
+    #[test]
+    fn test_agent_health_failure_identifies_remote_agent() {
+        let error = agent_health_failure(0, 2, 2).expect("remote failure");
+
+        assert_eq!(error.code, "REMOTE_AGENT_UNAVAILABLE");
+    }
+
+    #[test]
+    fn test_agent_health_failure_accepts_healthy_agents() {
+        assert!(agent_health_failure(0, 0, 2).is_none());
+    }
+
+    #[test]
+    fn test_agent_health_failure_tolerates_one_transient_failure() {
+        assert!(agent_health_failure(1, 1, 2).is_none());
+    }
+
+    #[test]
+    fn test_ensure_controller_ready_rejects_inactive_local_agent() {
+        let error = ensure_controller_ready(false, true).expect_err("inactive agent is rejected");
+
+        assert_eq!(error.code, "LOCAL_AGENT_UNAVAILABLE");
+    }
+
+    #[test]
+    fn test_ensure_controller_ready_rejects_missing_sunshine_configuration() {
+        let error = ensure_controller_ready(true, false).expect_err("missing setup is rejected");
+
+        assert_eq!(error.code, "LOCAL_SUNSHINE_UNCONFIGURED");
+    }
+
+    #[test]
+    fn test_ensure_controller_ready_accepts_configured_controller() {
+        assert!(ensure_controller_ready(true, true).is_ok());
+    }
 
     #[test]
     fn test_measured_latency_reports_zero_for_local_device() {

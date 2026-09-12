@@ -78,6 +78,15 @@ impl PortError {
             "STREAM_START_FAILED" => {
                 "The stream could not be started. Check Moonlight and try again."
             }
+            "LOCAL_AGENT_UNAVAILABLE" => {
+                "The local Omarchy Desk agent is not running. Start omdesk-agent and try again."
+            }
+            "REMOTE_AGENT_UNAVAILABLE" => {
+                "The remote Omarchy Desk agent stopped responding. The stream was closed."
+            }
+            "LOCAL_SUNSHINE_UNCONFIGURED" => {
+                "Sunshine is not configured on this device. Run `omdesk setup` and try again."
+            }
             "ACCESS_STORE_FAILED" => {
                 "The allowed devices list could not be updated. Check its file permissions."
             }

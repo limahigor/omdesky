@@ -110,6 +110,16 @@ impl SunshineCredentialStore {
         Ok(Some(credentials))
     }
 
+    pub async fn configured(&self) -> PortResult<bool> {
+        let store = self.clone();
+
+        tokio::task::spawn_blocking(move || store.load())
+            .await
+            .map_err(|_| credential_port_error())?
+            .map(|credentials| credentials.is_some())
+            .map_err(|_| credential_port_error())
+    }
+
     pub fn store(&self, username: &str, password: &str) -> Result<(), SunshineCredentialError> {
         if username.is_empty() || password.is_empty() {
             return Err(SunshineCredentialError::InvalidCredentials);

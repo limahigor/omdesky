@@ -5,7 +5,7 @@ use omdesk_application::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
         MeshNetwork, StreamHost,
     },
-    services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream},
+    services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream, ensure_controller_ready},
 };
 use omdesk_core::{
     CodecPreference, DisplayId, InputMode, KeyChord, KeyModifier, NodeId, RemoteCommand,
@@ -459,11 +459,20 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
 
 async fn connect(args: ConnectArgs) -> Result<()> {
     let config = Config::load()?;
-    let endpoint = resolve_endpoint(&args.target).await?;
+    let client = agent_client();
+    let controller_endpoint = local_agent_endpoint(config.network.agent_port)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
+        })?;
+    let local_agent_available = client.health(&controller_endpoint).await.is_ok();
+    let sunshine_configured = sunshine_credential_store()?.configured().await?;
+    ensure_controller_ready(local_agent_available, sunshine_configured)?;
 
+    let endpoint = resolve_endpoint(&args.target).await?;
     let notifications = Arc::new(OmarchyNotificationAdapter::default());
     let service = ConnectNode::new(
-        agent_client(),
+        client,
         moonlight_adapter(),
         Arc::new(HyprlandSessionKeybinds::new(Arc::new(TokioCommandRunner))),
         notifications,
@@ -478,16 +487,6 @@ async fn connect(args: ConnectArgs) -> Result<()> {
 
     let session_path = runtime_session_path().ok();
     write_session(session_path.as_deref(), &args.target, input_mode);
-
-    let controller_endpoint = if input_mode == InputMode::Remote {
-        local_agent_endpoint(config.network.agent_port)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
-            })?
-    } else {
-        endpoint.clone()
-    };
 
     let exit = service
         .execute(ConnectRequest {

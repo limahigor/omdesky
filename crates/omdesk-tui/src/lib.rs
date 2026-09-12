@@ -4,9 +4,12 @@ use crossterm::event::{
 };
 use omdesk_application::{
     ports::{
-        AccessStore, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork, PortError,
+        AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork,
+        PortError,
     },
-    services::{ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode},
+    services::{
+        ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode, ensure_controller_ready,
+    },
 };
 use omdesk_core::{
     CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, RemoteCommand,
@@ -189,8 +192,16 @@ impl StreamSetting {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LocalReadiness {
+    Checking,
+    Ready,
+    Blocked(String),
+}
+
 enum AsyncMessage {
     Discovery(DiscoveryResult),
+    LocalReadiness(Result<(), String>),
     SessionStarted {
         generation: u64,
         node_id: String,
@@ -199,6 +210,7 @@ enum AsyncMessage {
     SessionEnded {
         generation: u64,
         result: Result<String, String>,
+        local_failure: bool,
     },
     Focus(Result<String, String>),
     Access(Result<Vec<AccessRow>, String>),
@@ -219,6 +231,7 @@ struct AppState {
     error: Option<String>,
     overlay: Option<Overlay>,
     sunshine_configured: bool,
+    local_readiness: LocalReadiness,
     access_entries: Vec<AccessRow>,
     stream_profile: StreamProfile,
     display_mode: DisplayMode,
@@ -242,6 +255,7 @@ impl AppState {
             error: None,
             overlay: None,
             sunshine_configured: false,
+            local_readiness: LocalReadiness::Checking,
             access_entries: Vec::new(),
             stream_profile: StreamProfile::default(),
             display_mode: DisplayMode::default(),
@@ -271,7 +285,15 @@ impl AppState {
             .cloned()
     }
 
-    fn unavailable_reason(&self) -> Option<&'static str> {
+    fn unavailable_reason(&self) -> Option<&str> {
+        if let LocalReadiness::Blocked(error) = &self.local_readiness {
+            return Some(error);
+        }
+
+        if self.local_readiness == LocalReadiness::Checking {
+            return Some("Checking local connection requirements. Please wait.");
+        }
+
         let node = self.selected()?;
         if node.is_local {
             Some("This device cannot connect to itself")
@@ -327,6 +349,26 @@ fn start_refresh(discovery: Arc<DiscoverNodes>, sender: mpsc::Sender<AsyncMessag
     });
 }
 
+fn start_local_readiness(
+    agent: Arc<HttpAgentClient>,
+    credentials: SunshineCredentialStore,
+    agent_port: u16,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
+    tokio::spawn(async move {
+        let endpoint = local_agent_endpoint(agent_port).await;
+        let agent_available = match endpoint {
+            Ok(endpoint) => agent.health(&endpoint).await.is_ok(),
+            Err(_) => false,
+        };
+        let sunshine_configured = credentials.configured().await.unwrap_or(false);
+        let result = ensure_controller_ready(agent_available, sunshine_configured)
+            .map_err(|error| error.user_message().to_owned());
+
+        let _ = sender.send(AsyncMessage::LocalReadiness(result)).await;
+    });
+}
+
 fn start_connect(
     services: &Services,
     node: DiscoveredNode,
@@ -338,16 +380,46 @@ fn start_connect(
         address: node.address,
         port: services.agent_port,
     };
+    let agent = services.agent.clone();
     let agent_port = services.agent_port;
+    let credentials = services.sunshine_credentials.clone();
     let profile = Config::load()
         .map(|config| stream_profile(&config))
         .unwrap_or_else(|_| StreamProfile::default());
     let input_mode = InputMode::Remote;
 
     tokio::spawn(async move {
-        let controller_endpoint = local_agent_endpoint(agent_port)
-            .await
-            .unwrap_or_else(|_| endpoint.clone());
+        let controller_endpoint = match local_agent_endpoint(agent_port).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let result = Err(format!(
+                    "The connection could not be completed. {}",
+                    PortError::new("LOCAL_AGENT_UNAVAILABLE", error.to_string(), true)
+                        .user_message()
+                ));
+                let _ = sender
+                    .send(AsyncMessage::SessionEnded {
+                        generation,
+                        result,
+                        local_failure: true,
+                    })
+                    .await;
+                return;
+            }
+        };
+        let local_agent_available = agent.health(&controller_endpoint).await.is_ok();
+        let sunshine_configured = credentials.configured().await.unwrap_or(false);
+        if let Err(error) = ensure_controller_ready(local_agent_available, sunshine_configured) {
+            let result = Err(user_error("The connection could not be completed.", &error));
+            let _ = sender
+                .send(AsyncMessage::SessionEnded {
+                    generation,
+                    result,
+                    local_failure: true,
+                })
+                .await;
+            return;
+        }
 
         let node_id = node.tailnet_node_id.clone();
         let node_name = node.name.clone();
@@ -373,12 +445,22 @@ fn start_connect(
                         .await;
                 },
             )
-            .await
+            .await;
+        let local_failure = result.as_ref().is_err_and(|error| {
+            matches!(
+                error.code,
+                "LOCAL_AGENT_UNAVAILABLE" | "LOCAL_SUNSHINE_UNCONFIGURED"
+            )
+        });
+        let result = result
             .map(|exit| stream_exit_message(&node.name, exit))
             .map_err(|error| user_error("The connection could not be completed.", &error));
-
         let _ = sender
-            .send(AsyncMessage::SessionEnded { generation, result })
+            .send(AsyncMessage::SessionEnded {
+                generation,
+                result,
+                local_failure,
+            })
             .await;
     });
 }
@@ -530,9 +612,24 @@ fn requires_terminal_reset(message: &AsyncMessage) -> bool {
     )
 }
 
+fn requires_local_readiness_refresh(message: &AsyncMessage) -> bool {
+    matches!(message, AsyncMessage::CredentialStored(Ok(())))
+}
+
 fn apply_message(state: &mut AppState, message: AsyncMessage) {
     match message {
         AsyncMessage::Discovery(result) => apply_refresh(state, result),
+        AsyncMessage::LocalReadiness(result) => match result {
+            Ok(()) => {
+                state.local_readiness = LocalReadiness::Ready;
+                state.error = None;
+            }
+            Err(error) => {
+                state.local_readiness = LocalReadiness::Blocked(error.clone());
+                state.error = Some(error);
+                state.notice = None;
+            }
+        },
         AsyncMessage::SessionStarted {
             generation,
             node_id,
@@ -544,12 +641,24 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
             state.error = None;
         }
         AsyncMessage::SessionStarted { .. } => {}
-        AsyncMessage::SessionEnded { generation, result }
-            if generation == state.session_generation =>
-        {
+        AsyncMessage::SessionEnded {
+            generation,
+            result,
+            local_failure,
+        } if generation == state.session_generation => {
             state.activity = Activity::Idle;
             state.active_node_id = None;
             state.detail_expanded = false;
+
+            if local_failure {
+                state.local_readiness = LocalReadiness::Blocked(
+                    result
+                        .as_ref()
+                        .err()
+                        .cloned()
+                        .unwrap_or_else(|| "The local controller is unavailable.".to_owned()),
+                );
+            }
 
             match result {
                 Ok(notice) => {
@@ -582,11 +691,15 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
         },
         AsyncMessage::CredentialStatus(result) => match result {
             Ok(configured) => state.sunshine_configured = configured,
-            Err(error) => state.error = Some(error),
+            Err(error) => {
+                state.local_readiness = LocalReadiness::Blocked(error.clone());
+                state.error = Some(error);
+            }
         },
         AsyncMessage::CredentialStored(result) => match result {
             Ok(()) => {
                 state.sunshine_configured = true;
+                state.local_readiness = LocalReadiness::Checking;
                 state.notice = Some("Sunshine credentials saved".to_owned());
                 state.error = None;
             }
@@ -605,7 +718,9 @@ fn apply_refresh(state: &mut AppState, result: DiscoveryResult) {
     match result {
         Ok(nodes) => {
             state.nodes = nodes;
-            state.error = None;
+            if state.local_readiness == LocalReadiness::Ready {
+                state.error = None;
+            }
             state.select_first();
         }
         Err(error) => {
@@ -624,6 +739,12 @@ async fn run_loop(
     let (sender, mut receiver) = mpsc::channel(16);
     state.loading = true;
     start_credential_status(services.sunshine_credentials.clone(), sender.clone());
+    start_local_readiness(
+        services.agent.clone(),
+        services.sunshine_credentials.clone(),
+        services.agent_port,
+        sender.clone(),
+    );
 
     let loaded = Config::load().ok();
     state.stream_profile = loaded.as_ref().map(stream_profile).unwrap_or_default();
@@ -635,7 +756,16 @@ async fn run_loop(
 
         while let Ok(message) = receiver.try_recv() {
             let reset_terminal = requires_terminal_reset(&message);
+            let refresh_readiness = requires_local_readiness_refresh(&message);
             apply_message(state, message);
+            if refresh_readiness {
+                start_local_readiness(
+                    services.agent.clone(),
+                    services.sunshine_credentials.clone(),
+                    services.agent_port,
+                    sender.clone(),
+                );
+            }
             if reset_terminal {
                 terminal.clear()?;
                 terminal.autoresize()?;
@@ -646,7 +776,7 @@ async fn run_loop(
             && state.active_node_id.is_none()
             && let Some(node) = state.pending_node.take()
         {
-            begin_connect(state, &services, node, sender.clone());
+            start_preflight(state, &services, node, sender.clone());
         }
 
         terminal.draw(|frame| draw(frame, state))?;
@@ -678,7 +808,7 @@ fn point_in_rect(column: u16, row: u16, rect: Rect) -> bool {
     column >= rect.x && column < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn begin_connect(
+fn start_preflight(
     state: &mut AppState,
     services: &Services,
     node: DiscoveredNode,
@@ -688,7 +818,7 @@ fn begin_connect(
     state.activity = Activity::Connecting;
     state.active_node_id = None;
     state.error = None;
-    state.notice = Some(format!("Connecting to {}…", node.name));
+    state.notice = Some(format!("Checking connection to {}…", node.name));
     start_connect(services, node, state.session_generation, sender);
 }
 
@@ -709,9 +839,16 @@ async fn handle_key(
         KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
         KeyCode::Char('r') if !state.loading => {
             state.loading = true;
+            state.local_readiness = LocalReadiness::Checking;
             state.error = None;
             state.notice = None;
             start_refresh(services.discovery.clone(), sender.clone());
+            start_local_readiness(
+                services.agent.clone(),
+                services.sunshine_credentials.clone(),
+                services.agent_port,
+                sender.clone(),
+            );
         }
         KeyCode::Char('s') => {
             start_credential_status(services.sunshine_credentials.clone(), sender.clone());
@@ -724,8 +861,8 @@ async fn handle_key(
             });
         }
         KeyCode::Enter => {
-            if let Some(reason) = state.unavailable_reason() {
-                state.error = Some(reason.to_owned());
+            if let Some(reason) = state.unavailable_reason().map(str::to_owned) {
+                state.error = Some(format!("ATTENTION: {reason}"));
                 state.notice = None;
             } else if let Some(node) = state.selected_remote() {
                 match session_action(state.active_node_id.as_deref(), &node.tailnet_node_id) {
@@ -756,7 +893,7 @@ async fn handle_key(
                     }
                     SessionAction::Start => {
                         if state.activity == Activity::Idle {
-                            begin_connect(state, services, node, sender.clone());
+                            start_preflight(state, services, node, sender.clone());
                         }
                     }
                 }
@@ -1730,7 +1867,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
         label("  refresh    ", theme),
     ];
 
-    if state.selected_remote().is_some() {
+    if state.selected_remote().is_some() && state.local_readiness == LocalReadiness::Ready {
         spans.extend([key("󰌑 Enter", theme), label("  connect    ", theme)]);
     }
 
@@ -2113,6 +2250,7 @@ mod tests {
         let ended = AsyncMessage::SessionEnded {
             generation: 1,
             result: Ok("disconnected".to_owned()),
+            local_failure: false,
         };
 
         assert!(requires_terminal_reset(&started));
@@ -2172,6 +2310,7 @@ mod tests {
         let mut local = node("omarchy");
         local.is_local = true;
         let mut state = state();
+        state.local_readiness = LocalReadiness::Ready;
 
         apply_refresh(&mut state, Ok(vec![local]));
 
@@ -2180,6 +2319,34 @@ mod tests {
         assert_eq!(
             state.unavailable_reason(),
             Some("This device cannot connect to itself")
+        );
+    }
+
+    #[test]
+    fn test_local_readiness_blocks_connection_before_device_validation() {
+        let mut state = state();
+        apply_refresh(&mut state, Ok(vec![node("workstation")]));
+        state.local_readiness =
+            LocalReadiness::Blocked("The local agent is not running.".to_owned());
+
+        assert_eq!(
+            state.unavailable_reason(),
+            Some("The local agent is not running.")
+        );
+    }
+
+    #[test]
+    fn test_refresh_preserves_local_readiness_error() {
+        let mut state = state();
+        state.local_readiness =
+            LocalReadiness::Blocked("The local agent is not running.".to_owned());
+        state.error = Some("The local agent is not running.".to_owned());
+
+        apply_refresh(&mut state, Ok(vec![node("workstation")]));
+
+        assert_eq!(
+            state.error.as_deref(),
+            Some("The local agent is not running.")
         );
     }
 
