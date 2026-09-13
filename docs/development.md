@@ -1,6 +1,6 @@
 # Development
 
-This page covers building, testing, and diagnosing Omarchy Desk from a source checkout.
+This page covers building, testing, and diagnosing Omdesky from a source checkout.
 
 ## Requirements
 
@@ -17,19 +17,19 @@ cargo build --workspace
 Open the terminal interface:
 
 ```bash
-cargo run -p omdesk-cli --bin omdesk
+cargo run -p omdesky-cli --bin omdesky
 ```
 
 Run a command:
 
 ```bash
-cargo run -p omdesk-cli --bin omdesk -- devices
+cargo run -p omdesky-cli --bin omdesky -- devices
 ```
 
 Start the agent in the current desktop session:
 
 ```bash
-cargo run -p omdesk-agent --bin omdesk-agent
+cargo run -p omdesky-agent --bin omdesky-agent
 ```
 
 The agent stops during startup if it cannot detect Omarchy 4, obtain a Tailscale address, or open its listener.
@@ -63,8 +63,8 @@ Tests cover validation, protocol data, command construction, Tailscale and Hyprl
 Debug builds can emit structured runtime details through `RUST_LOG`:
 
 ```bash
-RUST_LOG=debug cargo run -p omdesk-agent --bin omdesk-agent
-RUST_LOG=debug cargo run -p omdesk-cli --bin omdesk -- devices
+RUST_LOG=debug cargo run -p omdesky-agent --bin omdesky-agent
+RUST_LOG=debug cargo run -p omdesky-cli --bin omdesky -- devices
 ```
 
 User-facing errors remain short and actionable. Debug output contains the underlying operation, error code, and technical detail needed for diagnosis. Do not include passwords or other secrets in logs.
@@ -72,30 +72,30 @@ User-facing errors remain short and actionable. Debug output contains the underl
 For a quick environment check, run:
 
 ```bash
-omdesk doctor
-omdesk devices --all-tailnet
+omdesky doctor
+omdesky devices --all-tailnet
 ```
 
 Add `--json` when comparing output in a script or test.
 
 ## Workspace layout
 
-- `crates/omdesk-core` contains shared values and validation.
-- `crates/omdesk-protocol` contains the JSON request and response types.
-- `crates/omdesk-application` contains discovery, pairing, connection, and display behavior.
-- `crates/omdesk-platform` integrates with Tailscale, Hyprland, Moonlight, Sunshine, files, processes, and desktop notifications.
-- `crates/omdesk-agent` provides the service that runs on a remote computer.
-- `crates/omdesk-cli` provides commands and starts the terminal interface.
-- `crates/omdesk-tui` renders and controls the terminal interface.
+- `crates/omdesky-core` contains shared values and validation.
+- `crates/omdesky-protocol` contains the JSON request and response types.
+- `crates/omdesky-application` contains discovery, pairing, connection, and display behavior.
+- `crates/omdesky-platform` integrates with Tailscale, Hyprland, Moonlight, Sunshine, files, processes, and desktop notifications.
+- `crates/omdesky-agent` provides the service that runs on a remote computer.
+- `crates/omdesky-cli` provides commands and starts the terminal interface.
+- `crates/omdesky-tui` renders and controls the terminal interface.
 - `packaging/arch` contains the Arch package definition.
 - `packaging/systemd` contains the user service.
 
 ## Packaging
 
-`packaging/arch/PKGBUILD` installs `omdesk`, `omdesk-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
+`packaging/arch/PKGBUILD` installs `omdesky`, `omdesky-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
 
 After installing the package, enable the agent for the current user:
 
 ```bash
-systemctl --user enable --now omdesk-agent.service
+systemctl --user enable --now omdesky-agent.service
 ```

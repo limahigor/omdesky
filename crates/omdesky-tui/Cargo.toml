@@ -1,0 +1,18 @@
+[package]
+name = "omdesky-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+omdesky-application = { path = "../omdesky-application" }
+omdesky-core = { path = "../omdesky-core" }
+omdesky-platform = { path = "../omdesky-platform" }
+omdesky-protocol = { path = "../omdesky-protocol" }
+ratatui.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true

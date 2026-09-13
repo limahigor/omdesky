@@ -1,11 +1,11 @@
 # Configuration and access control
 
-Omarchy Desk works without a configuration file. Create one only when you want to change stream defaults, use a different agent port, or assign shorter names to devices.
+Omdesky works without a configuration file. Create one only when you want to change stream defaults, use a different agent port, or assign shorter names to devices.
 
-The file is read from `$XDG_CONFIG_HOME/omdesk/config.toml` when `XDG_CONFIG_HOME` is set. Otherwise, use:
+The file is read from `$XDG_CONFIG_HOME/omdesky/config.toml` when `XDG_CONFIG_HOME` is set. Otherwise, use:
 
 ```text
-~/.config/omdesk/config.toml
+~/.config/omdesky/config.toml
 ```
 
 ## Example
@@ -63,7 +63,7 @@ The command-line `connect` command uses its command-line defaults. Pass explicit
 Entries under `[devices]` provide convenient command targets. In this example, `office` resolves through the alias `workstation`:
 
 ```bash
-omdesk connect office
+omdesky connect office
 ```
 
 `default_display` and `default_workspace` are stored for future use and do not currently change a connection.
@@ -77,10 +77,10 @@ The default agent port is `48155`. Set the same value on every computer that run
 agent_port = 48155
 ```
 
-The environment variable `OMDESK_AGENT_PORT` overrides the file for one process:
+The environment variable `OMDESKY_AGENT_PORT` overrides the file for one process:
 
 ```bash
-OMDESK_AGENT_PORT=49000 omdesk devices
+OMDESKY_AGENT_PORT=49000 omdesky devices
 ```
 
 The agent listens only on the local Tailscale address. `allow_unsafe_wildcard_bind` disables the address-range safety check, but it does not make the agent listen on every network interface.
@@ -89,23 +89,23 @@ The agent listens only on the local Tailscale address. `allow_unsafe_wildcard_bi
 
 Tailscale is the first access boundary. Your Tailscale policy must allow the controller to reach the remote computer's agent port.
 
-Omarchy Desk also has a local allowlist. An empty list accepts any caller that Tailscale can identify and route to the agent. Once you add an entry, only listed controllers are accepted.
+Omdesky also has a local allowlist. An empty list accepts any caller that Tailscale can identify and route to the agent. Once you add an entry, only listed controllers are accepted.
 
 Run these commands on the remote computer:
 
 ```bash
-omdesk access allow controller-hostname
-omdesk access list
-omdesk access revoke controller-hostname
+omdesky access allow controller-hostname
+omdesky access list
+omdesky access revoke controller-hostname
 ```
 
-The allowlist is stored at `$XDG_STATE_HOME/omdesk/access/allowlist.json`, or `~/.local/state/omdesk/access/allowlist.json` when `XDG_STATE_HOME` is unset.
+The allowlist is stored at `$XDG_STATE_HOME/omdesky/access/allowlist.json`, or `~/.local/state/omdesky/access/allowlist.json` when `XDG_STATE_HOME` is unset.
 
-Use Tailscale hostnames or addresses when adding a controller. Omarchy Desk resolves them to the stable Tailscale device identity before saving the entry.
+Use Tailscale hostnames or addresses when adding a controller. Omdesky resolves them to the stable Tailscale device identity before saving the entry.
 
 ## Sunshine credentials
 
-`omdesk setup` stores the Sunshine web-interface username and password in the desktop user's Linux Secret Service collection. The credentials are not written to `config.toml` or another plaintext configuration file.
+`omdesky setup` stores the Sunshine web-interface username and password in the desktop user's Linux Secret Service collection. The credentials are not written to `config.toml` or another plaintext configuration file.
 
 Run setup from an unlocked graphical session so the session D-Bus and Secret Service are available. The agent reads the keyring entry when approving a pairing request through Sunshine on the same computer, so restarting it is not required after updating the credentials.
 

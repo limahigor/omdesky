@@ -1654,15 +1654,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-agent"
+name = "omdesky-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "omdesk-application",
- "omdesk-core",
- "omdesk-platform",
- "omdesk-protocol",
+ "omdesky-application",
+ "omdesky-core",
+ "omdesky-platform",
+ "omdesky-protocol",
  "rand",
  "serde",
  "serde_json",
@@ -1674,13 +1674,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-application"
+name = "omdesky-application"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
- "omdesk-core",
- "omdesk-protocol",
+ "omdesky-core",
+ "omdesky-protocol",
  "serde",
  "thiserror",
  "time",
@@ -1689,16 +1689,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-cli"
+name = "omdesky-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "omdesk-application",
- "omdesk-core",
- "omdesk-platform",
- "omdesk-protocol",
- "omdesk-tui",
+ "omdesky-application",
+ "omdesky-core",
+ "omdesky-platform",
+ "omdesky-protocol",
+ "omdesky-tui",
  "rpassword",
  "serde_json",
  "time",
@@ -1709,7 +1709,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-core"
+name = "omdesky-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1720,14 +1720,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-platform"
+name = "omdesky-platform"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "keyring",
- "omdesk-application",
- "omdesk-core",
- "omdesk-protocol",
+ "omdesky-application",
+ "omdesky-core",
+ "omdesky-protocol",
  "reqwest",
  "secrecy",
  "serde",
@@ -1742,24 +1742,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "omdesk-protocol"
+name = "omdesky-protocol"
 version = "0.1.0"
 dependencies = [
- "omdesk-core",
+ "omdesky-core",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "omdesk-tui"
+name = "omdesky-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
- "omdesk-application",
- "omdesk-core",
- "omdesk-platform",
- "omdesk-protocol",
+ "omdesky-application",
+ "omdesky-core",
+ "omdesky-platform",
+ "omdesky-protocol",
  "ratatui",
  "time",
  "tokio",

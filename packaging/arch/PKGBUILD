@@ -1,9 +1,9 @@
-pkgname=omarchy-desk
+pkgname=omdesky
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Omarchy-native remote desktop orchestration over Tailscale'
 arch=('x86_64')
-url='https://github.com/omacom/omarchy'
+url='https://github.com/limahigor/omdesky'
 license=('MIT')
 depends=('tailscale' 'sunshine' 'moonlight-qt')
 makedepends=('cargo')
@@ -15,8 +15,8 @@ build() {
 }
 
 package() {
-  install -Dm755 target/release/omdesk "$pkgdir/usr/bin/omdesk"
-  install -Dm755 target/release/omdesk-agent "$pkgdir/usr/bin/omdesk-agent"
-  install -Dm644 packaging/systemd/omdesk-agent.service "$pkgdir/usr/lib/systemd/user/omdesk-agent.service"
+  install -Dm755 target/release/omdesky "$pkgdir/usr/bin/omdesky"
+  install -Dm755 target/release/omdesky-agent "$pkgdir/usr/bin/omdesky-agent"
+  install -Dm644 packaging/systemd/omdesky-agent.service "$pkgdir/usr/lib/systemd/user/omdesky-agent.service"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

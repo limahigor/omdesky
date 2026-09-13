@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "crates/omdesk-core",
-    "crates/omdesk-application",
-    "crates/omdesk-protocol",
-    "crates/omdesk-platform",
-    "crates/omdesk-cli",
-    "crates/omdesk-tui",
-    "crates/omdesk-agent",
+    "crates/omdesky-core",
+    "crates/omdesky-application",
+    "crates/omdesky-protocol",
+    "crates/omdesky-platform",
+    "crates/omdesky-cli",
+    "crates/omdesky-tui",
+    "crates/omdesky-agent",
 ]
 resolver = "2"
 

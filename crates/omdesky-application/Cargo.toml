@@ -1,0 +1,20 @@
+[package]
+name = "omdesky-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+omdesky-core = { path = "../omdesky-core" }
+omdesky-protocol = { path = "../omdesky-protocol" }
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

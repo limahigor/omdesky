@@ -1,0 +1,29 @@
+[package]
+name = "omdesky-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "omdesky-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+omdesky-application = { path = "../omdesky-application" }
+omdesky-core = { path = "../omdesky-core" }
+omdesky-platform = { path = "../omdesky-platform" }
+omdesky-protocol = { path = "../omdesky-protocol" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tower.workspace = true

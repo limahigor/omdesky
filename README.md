@@ -1,8 +1,8 @@
-# Omarchy Desk
+# Omdesky
 
-Omarchy Desk lets you use one Omarchy computer from another through Tailscale. It finds your computers, prepares Sunshine on the remote machine, pairs it with Moonlight, and opens the stream from a terminal interface.
+Omdesky lets you use one Omarchy computer from another through Tailscale. It finds your computers, prepares Sunshine on the remote machine, pairs it with Moonlight, and opens the stream from a terminal interface.
 
-The video, sound, and input connection runs directly between Moonlight and Sunshine. Omarchy Desk handles setup and desktop controls without carrying the stream itself.
+The video, sound, and input connection runs directly between Moonlight and Sunshine. Omdesky handles setup and desktop controls without carrying the stream itself.
 
 ## What you can do
 
@@ -16,14 +16,14 @@ The video, sound, and input connection runs directly between Moonlight and Sunsh
 
 ## Requirements
 
-Omarchy Desk currently supports Omarchy 4 on x86-64 systems.
+Omdesky currently supports Omarchy 4 on x86-64 systems.
 
 On every computer you want to control:
 
 - Tailscale must be connected
 - Sunshine must be installed and running
 - Hyprland must be running in the current desktop session
-- `omdesk-agent` must run as your desktop user
+- `omdesky-agent` must run as your desktop user
 
 On the computer you use as the controller:
 
@@ -42,27 +42,27 @@ cargo build --release --locked --workspace
 The binaries are created at:
 
 ```text
-target/release/omdesk
-target/release/omdesk-agent
+target/release/omdesky
+target/release/omdesky-agent
 ```
 
-Copy both files to a directory in your `PATH`. If you want the agent to start with your desktop session, also install `packaging/systemd/omdesk-agent.service` as a user service.
+Copy both files to a directory in your `PATH`. If you want the agent to start with your desktop session, also install `packaging/systemd/omdesky-agent.service` as a user service.
 
 ## Set up a computer for remote access
 
 Run these commands on the computer you want to control:
 
 ```bash
-omdesk setup
-systemctl --user enable --now omdesk-agent.service
+omdesky setup
+systemctl --user enable --now omdesky-agent.service
 ```
 
-`omdesk setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
+`omdesky setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
 
 Check the setup with:
 
 ```bash
-omdesk doctor
+omdesky doctor
 ```
 
 ## Connect
@@ -70,7 +70,7 @@ omdesk doctor
 Make sure both computers are online in Tailscale. On the controller, open the terminal interface:
 
 ```bash
-omdesk
+omdesky
 ```
 
 Select a ready device with the arrow keys and press `Enter` to connect. Press `s` to change stream settings or `r` to scan again.
@@ -78,15 +78,15 @@ Select a ready device with the arrow keys and press `Enter` to connect. Press `s
 You can also connect directly from the command line:
 
 ```bash
-omdesk devices
-omdesk connect workstation
+omdesky devices
+omdesky connect workstation
 ```
 
-Omarchy Desk pairs Moonlight and Sunshine automatically when needed.
+Omdesky pairs Moonlight and Sunshine automatically when needed.
 
 ## Shortcuts during a stream
 
-Remote input mode lets Omarchy Desk send system shortcuts to the remote desktop.
+Remote input mode lets Omdesky send system shortcuts to the remote desktop.
 
 - `Super+R` switches shortcut capture between the remote and local desktops
 - `Super+Q` closes the remote session
@@ -97,22 +97,22 @@ When capture is released, local shortcuts work normally on the controller.
 ## Common commands
 
 ```bash
-omdesk devices
-omdesk pair workstation
-omdesk connect workstation --windowed
-omdesk connect workstation --width 2560 --height 1440 --fps 120
-omdesk doctor
+omdesky devices
+omdesky pair workstation
+omdesky connect workstation --windowed
+omdesky connect workstation --width 2560 --height 1440 --fps 120
+omdesky doctor
 ```
 
-Run `omdesk --help` or `omdesk <command> --help` to see every available option.
+Run `omdesky --help` or `omdesky <command> --help` to see every available option.
 
 ## More help
 
 - [User guide](docs/usage.md)
 - [Configuration and access control](docs/configuration.md)
 - [Troubleshooting and development](docs/development.md)
-- [How Omarchy Desk works](docs/architecture.md)
+- [How Omdesky works](docs/architecture.md)
 
 ## License
 
-Omarchy Desk is available under the [MIT License](LICENSE).
+Omdesky is available under the [MIT License](LICENSE).
