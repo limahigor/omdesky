@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace
+      - name: Package artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dist="omdesky-${version}-x86_64-linux"
+          mkdir -p "$dist"
+          cp target/release/omdesky "$dist/"
+          cp target/release/omdesky-agent "$dist/"
+          cp packaging/systemd/omdesky-agent.service "$dist/"
+          cp scripts/install.sh "$dist/"
+          cp LICENSE README.md "$dist/"
+          tar -czf "${dist}.tar.gz" "$dist"
+          sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            omdesky-*-x86_64-linux.tar.gz
+            omdesky-*-x86_64-linux.tar.gz.sha256
+          generate_release_notes: true
