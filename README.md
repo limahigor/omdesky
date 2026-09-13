@@ -4,6 +4,8 @@ Omdesky lets you use one Omarchy computer from another through Tailscale. It fin
 
 The video, sound, and input connection runs directly between Moonlight and Sunshine. Omdesky handles setup and desktop controls without carrying the stream itself.
 
+Everything Omdesky does is available from the terminal interface. Run `omdesky` with no arguments to set up credentials, scan devices, connect, pair, and change stream settings without memorizing any commands. The CLI subcommands shown throughout this guide exist for scripting and quick access, but each one has an equivalent inside the interface.
+
 ## What you can do
 
 - Find Omarchy computers on your Tailnet
