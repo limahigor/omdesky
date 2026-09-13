@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-application"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "keyring",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omdesky-core",
  "serde",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "crossterm",
