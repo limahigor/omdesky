@@ -150,7 +150,7 @@ struct ConnectArgs {
     fullscreen: bool,
     #[arg(long)]
     windowed: bool,
-    #[arg(long, value_enum, default_value_t = InputArg::Local)]
+    #[arg(long, value_enum, default_value_t = InputArg::Remote)]
     input: InputArg,
     #[arg(long)]
     no_audio: bool,

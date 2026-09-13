@@ -88,14 +88,14 @@ omdesky connect workstation --windowed
 omdesky connect workstation --width 2560 --height 1440 --fps 120
 omdesky connect workstation --codec hevc --bitrate 30
 omdesky connect workstation --workspace 2
-omdesky connect workstation --input remote
+omdesky connect workstation --input local
 ```
 
 Bitrate is measured in megabits per second. Available codecs are `auto`, `h264`, `hevc`, and `av1`.
 
 ## Control shortcuts during a stream
 
-With remote input enabled, system shortcuts are sent to the remote desktop.
+Remote input is enabled by default, so system shortcuts are sent to the remote desktop. Pass `--input local` to keep shortcuts on the controller instead.
 
 - Press `Super+R` to release shortcuts back to the controller.
 - Press `Super+R` again to send shortcuts to the remote desktop.
