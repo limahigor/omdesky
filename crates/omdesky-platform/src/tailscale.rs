@@ -7,6 +7,12 @@ use omdesky_core::{ConnectionKind, MeshPeer};
 use serde::Deserialize;
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
+const TAILSCALE_STATUS_LIMIT: usize = 4 * 1024 * 1024;
+const MAX_PEERS: usize = 1024;
+const MAX_ID_BYTES: usize = 256;
+const MAX_NAME_BYTES: usize = 255;
+const MAX_IPS_PER_NODE: usize = 16;
+
 #[derive(Clone)]
 pub struct TailscaleAdapter {
     runner: Arc<dyn CommandRunner>,
@@ -18,13 +24,10 @@ impl TailscaleAdapter {
     }
 
     async fn status(&self) -> PortResult<TailscaleStatus> {
-        let output = self
-            .runner
-            .run(CommandSpec::new(
-                "tailscale",
-                ["status".to_owned(), "--json".to_owned()],
-            ))
-            .await?;
+        let mut spec = CommandSpec::new("tailscale", ["status".to_owned(), "--json".to_owned()]);
+        spec.stdout_limit = TAILSCALE_STATUS_LIMIT;
+        let output = self.runner.run(spec).await?;
+
         parse_status(&output.stdout)
     }
 }
@@ -91,13 +94,25 @@ impl MeshNetwork for TailscaleAdapter {
 }
 
 pub fn parse_status(bytes: &[u8]) -> PortResult<TailscaleStatus> {
-    serde_json::from_slice(bytes).map_err(|error| {
+    if bytes.len() > TAILSCALE_STATUS_LIMIT {
+        return Err(PortError::new(
+            "TAILSCALE_STATUS_LIMIT",
+            "tailscale status exceeded the maximum response size",
+            false,
+        ));
+    }
+
+    let status: TailscaleStatus = serde_json::from_slice(bytes).map_err(|error| {
         PortError::new(
             "TAILSCALE_STATUS_INVALID",
             format!("unable to parse tailscale status: {error}"),
             false,
         )
-    })
+    })?;
+
+    validate_status(&status)?;
+
+    Ok(status)
 }
 
 pub fn parse_whois(bytes: &[u8]) -> PortResult<MeshNodeIdentity> {
@@ -117,6 +132,47 @@ pub fn parse_whois(bytes: &[u8]) -> PortResult<MeshNodeIdentity> {
             .or_else(|| whois.node.name.as_deref().map(dns_hostname)),
         addresses: Vec::new(),
     })
+}
+
+fn validate_status(status: &TailscaleStatus) -> PortResult<()> {
+    if status.peers.len() > MAX_PEERS {
+        return Err(PortError::new(
+            "TAILSCALE_PEER_LIMIT",
+            "tailscale status contained too many peers",
+            false,
+        ));
+    }
+
+    validate_peer(&status.self_node)?;
+
+    for peer in status.peers.values() {
+        validate_peer(peer)?;
+    }
+
+    Ok(())
+}
+
+fn validate_peer(peer: &RawPeer) -> PortResult<()> {
+    let valid_fields = peer.id.len() <= MAX_ID_BYTES
+        && peer
+            .dns_name
+            .as_ref()
+            .is_none_or(|value| value.len() <= MAX_NAME_BYTES)
+        && peer
+            .host_name
+            .as_ref()
+            .is_none_or(|value| value.len() <= MAX_NAME_BYTES)
+        && peer.tailscale_ips.len() <= MAX_IPS_PER_NODE;
+
+    if !valid_fields {
+        return Err(PortError::new(
+            "TAILSCALE_FIELD_LIMIT",
+            "tailscale status contained an oversized node field",
+            false,
+        ));
+    }
+
+    Ok(())
 }
 
 fn dns_hostname(dns_name: &str) -> String {
@@ -249,5 +305,44 @@ mod tests {
 
         assert_eq!(identity.tailnet_node_id, "nABC123");
         assert_eq!(identity.user.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn test_parse_status_rejects_oversized_input() {
+        let input = vec![b' '; TAILSCALE_STATUS_LIMIT + 1];
+
+        let error = parse_status(&input).expect_err("oversized status fails");
+
+        assert_eq!(error.code, "TAILSCALE_STATUS_LIMIT");
+    }
+
+    #[test]
+    fn test_parse_status_rejects_too_many_peers() {
+        let peers = (0..=MAX_PEERS)
+            .map(|index| {
+                format!(
+                    "\"peer-{index}\":{{\"ID\":\"id-{index}\",\"TailscaleIPs\":[\"100.64.0.1\"],\"Online\":true}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let input = format!(
+            "{{\"Self\":{{\"ID\":\"self\",\"TailscaleIPs\":[\"100.64.0.2\"]}},\"Peer\":{{{peers}}}}}"
+        );
+
+        let error = parse_status(input.as_bytes()).expect_err("too many peers fail");
+
+        assert_eq!(error.code, "TAILSCALE_PEER_LIMIT");
+    }
+
+    #[test]
+    fn test_parse_status_rejects_oversized_identity() {
+        let identity = "x".repeat(MAX_ID_BYTES + 1);
+        let input =
+            format!("{{\"Self\":{{\"ID\":\"{identity}\",\"TailscaleIPs\":[\"100.64.0.2\"]}}}}");
+
+        let error = parse_status(input.as_bytes()).expect_err("oversized identity fails");
+
+        assert_eq!(error.code, "TAILSCALE_FIELD_LIMIT");
     }
 }
