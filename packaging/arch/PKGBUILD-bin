@@ -1,0 +1,23 @@
+# Maintainer: limahigor
+pkgname=omdesky-bin
+_pkgname=omdesky
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Omarchy-native remote desktop orchestration over Tailscale (prebuilt binaries)'
+arch=('x86_64')
+url='https://github.com/limahigor/omdesky'
+license=('MIT')
+depends=('tailscale' 'sunshine' 'moonlight-qt')
+provides=('omdesky')
+conflicts=('omdesky')
+source=("$url/releases/download/v$pkgver/omdesky-$pkgver-x86_64-linux.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  local src="$srcdir/omdesky-$pkgver-x86_64-linux"
+
+  install -Dm755 "$src/omdesky" "$pkgdir/usr/bin/omdesky"
+  install -Dm755 "$src/omdesky-agent" "$pkgdir/usr/bin/omdesky-agent"
+  install -Dm644 "$src/omdesky-agent.service" "$pkgdir/usr/lib/systemd/user/omdesky-agent.service"
+  install -Dm644 "$src/LICENSE" "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+}

@@ -31,6 +31,31 @@ On the computer you use as the controller:
 - Moonlight Qt must be installed
 - The `moonlight` command must be available
 
+## Install
+
+The fastest way is the one-line installer. It downloads the latest prebuilt
+binaries and installs the user service into your home directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/limahigor/omdesky/master/scripts/install.sh | bash
+```
+
+Binaries go to `~/.local/bin`. Make sure that directory is in your `PATH`.
+
+### Install with pacman (Arch / Omarchy)
+
+Prefer a package you can update and remove with `pacman`? Build the prebuilt
+package from the repository:
+
+```bash
+git clone https://github.com/limahigor/omdesky.git
+cd omdesky/packaging/arch
+makepkg -p PKGBUILD-bin -si
+```
+
+To compile from source instead, use the standard `PKGBUILD` in the same
+directory with `makepkg -si`.
+
 ## Build from source
 
 Install Rust 1.88 or newer, then run:
