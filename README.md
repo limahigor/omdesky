@@ -42,7 +42,9 @@ binaries and installs the user service into your home directory:
 curl -fsSL https://raw.githubusercontent.com/limahigor/omdesky/master/scripts/install.sh | bash
 ```
 
-Binaries go to `~/.local/bin`. Make sure that directory is in your `PATH`.
+The standalone installer places binaries in `~/.local/bin` and writes a user service that points to that absolute location. Set `OMDESKY_BIN_DIR` to use another user-owned directory.
+
+Do not mix this method with the Arch package. Before switching to the package, remove `~/.local/bin/omdesky`, `~/.local/bin/omdesky-agent`, and `~/.config/systemd/user/omdesky-agent.service`, then run `systemctl --user daemon-reload`.
 
 ### Install with pacman (Arch / Omarchy)
 
@@ -56,7 +58,7 @@ makepkg -p PKGBUILD-bin -si
 ```
 
 To compile from source instead, use the standard `PKGBUILD` in the same
-directory with `makepkg -si`.
+directory with `makepkg -si`. Both packages install the binaries in `/usr/bin` and the user service in `/usr/lib/systemd/user`.
 
 ## Build from source
 

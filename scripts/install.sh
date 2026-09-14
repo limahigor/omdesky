@@ -28,12 +28,18 @@ install_from_dir() {
 
   info "Installing binaries to $BIN_DIR"
   mkdir -p "$BIN_DIR"
+  BIN_DIR="$(cd "$BIN_DIR" && pwd)"
   install -Dm755 "$src/omdesky" "$BIN_DIR/omdesky"
   install -Dm755 "$src/omdesky-agent" "$BIN_DIR/omdesky-agent"
 
   info "Installing user service to $UNIT_DIR"
   mkdir -p "$UNIT_DIR"
-  install -Dm644 "$src/omdesky-agent.service" "$UNIT_DIR/omdesky-agent.service"
+  quoted_agent="\"$(printf '%s' "$BIN_DIR/omdesky-agent" | sed 's/\\/\\\\/g; s/"/\\"/g')\""
+  AGENT_EXEC_START="ExecStart=$quoted_agent" awk '
+    /^ExecStart=/ { print ENVIRON["AGENT_EXEC_START"]; next }
+    { print }
+  ' "$src/omdesky-agent.service" > "$UNIT_DIR/omdesky-agent.service"
+  chmod 644 "$UNIT_DIR/omdesky-agent.service"
 
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 }

@@ -3,6 +3,7 @@ use crate::ports::{
     PairingState, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
     StreamClient, StreamHostDescriptor, StreamLaunchRequest,
 };
+use futures::{StreamExt, stream};
 use omdesky_core::{
     ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
     SessionEndpoint, SessionRole, SessionState, StreamProfile, WorkspaceTarget,
@@ -10,6 +11,9 @@ use omdesky_core::{
 use omdesky_protocol::{PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
 use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
+
+const MAX_DISCOVERY_PEERS: usize = 1024;
+const DISCOVERY_CONCURRENCY: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DiscoveredNode {
@@ -44,6 +48,14 @@ impl DiscoverNodes {
         let local = self.mesh.local_node().await?;
         let peers = self.mesh.peers().await?;
 
+        if peers.len() > MAX_DISCOVERY_PEERS {
+            return Err(PortError::new(
+                "DISCOVERY_PEER_LIMIT",
+                "the tailnet contains too many peers to discover safely",
+                false,
+            ));
+        }
+
         let mut nodes = Vec::new();
 
         let local_peer = MeshPeer {
@@ -60,15 +72,18 @@ impl DiscoverNodes {
             nodes.push(node);
         }
 
-        let probes = peers
-            .into_iter()
-            .map(|peer| self.probe(peer, include_all_tailnet, false));
+        let probes = stream::iter(
+            peers
+                .into_iter()
+                .map(|peer| self.probe(peer, include_all_tailnet, false)),
+        )
+        .buffer_unordered(DISCOVERY_CONCURRENCY);
 
         nodes.extend(
-            futures::future::join_all(probes)
-                .await
-                .into_iter()
-                .flatten(),
+            probes
+                .filter_map(std::future::ready)
+                .collect::<Vec<_>>()
+                .await,
         );
 
         nodes.sort_by(|left, right| {
@@ -94,17 +109,21 @@ impl DiscoverNodes {
             .or(peer.ips.first())
             .copied()?;
 
-        let endpoint = AgentEndpoint {
-            address,
-            port: self.agent_port,
-        };
-
         let name = peer
             .hostname
             .clone()
             .or(peer.dns_name.clone())
             .unwrap_or_else(|| peer.tailnet_node_id.clone());
 
+        if !peer.online {
+            return include_all
+                .then(|| generic_node(peer, name, address, NodeStatus::Offline, is_local));
+        }
+
+        let endpoint = AgentEndpoint {
+            address,
+            port: self.agent_port,
+        };
         let probe_started = Instant::now();
         match self.agent.health(&endpoint).await {
             Ok(health) if health.protocol == PROTOCOL_V1 => {

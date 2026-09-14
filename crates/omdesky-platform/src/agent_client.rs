@@ -12,6 +12,11 @@ use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_NODE_FIELD_BYTES: usize = 256;
+const MAX_VERSION_BYTES: usize = 128;
+const MAX_CAPABILITIES: usize = 128;
+const MAX_CAPABILITY_BYTES: usize = 128;
 
 #[derive(Clone, Default)]
 pub struct HttpAgentClient {
@@ -34,15 +39,29 @@ impl HttpAgentClient {
         format!("http://{address}:{}{path}", endpoint.port)
     }
 
-    async fn parse<T: DeserializeOwned>(response: reqwest::Response) -> PortResult<T> {
+    async fn parse<T: DeserializeOwned>(mut response: reqwest::Response) -> PortResult<T> {
         let status = response.status();
+        let mut body = Vec::new();
+
+        while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+            if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(PortError::new(
+                    "AGENT_RESPONSE_LIMIT",
+                    "the device response exceeded the maximum size",
+                    false,
+                ));
+            }
+
+            body.extend_from_slice(&chunk);
+        }
 
         if !status.is_success() {
-            let envelope = response.json::<ErrorEnvelope>().await.ok();
+            let envelope = serde_json::from_slice::<ErrorEnvelope>(&body).ok();
+
             return Err(http_error(status, envelope));
         }
 
-        response.json().await.map_err(|error| {
+        serde_json::from_slice(&body).map_err(|error| {
             tracing::debug!(%status, detail = %error, "agent.response_invalid");
             PortError::new(
                 "AGENT_PROTOCOL_INVALID",
@@ -95,7 +114,9 @@ impl AgentClient for HttpAgentClient {
     }
 
     async fn node_info(&self, endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse> {
-        self.get(endpoint, "/v1/node", REQUEST_TIMEOUT).await
+        let response = self.get(endpoint, "/v1/node", REQUEST_TIMEOUT).await?;
+
+        validate_node_info(response)
     }
 
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>> {
@@ -177,6 +198,29 @@ impl AgentClient for HttpAgentClient {
     }
 }
 
+fn validate_node_info(response: NodeInfoResponse) -> PortResult<NodeInfoResponse> {
+    let fields_are_valid = response.node_id.len() <= MAX_NODE_FIELD_BYTES
+        && response.hostname.len() <= MAX_NODE_FIELD_BYTES
+        && response.omarchy_version.len() <= MAX_VERSION_BYTES
+        && response.agent_version.len() <= MAX_VERSION_BYTES
+        && response.protocol_versions.len() <= 32
+        && response.capabilities.len() <= MAX_CAPABILITIES
+        && response
+            .capabilities
+            .iter()
+            .all(|capability| capability.len() <= MAX_CAPABILITY_BYTES);
+
+    if !fields_are_valid {
+        return Err(PortError::new(
+            "AGENT_FIELD_LIMIT",
+            "the device response contained an oversized field",
+            false,
+        ));
+    }
+
+    Ok(response)
+}
+
 fn network_error(error: reqwest::Error) -> PortError {
     tracing::debug!(
         detail = %error,
@@ -228,6 +272,74 @@ mod tests {
     use super::*;
     use omdesky_protocol::ProtocolError;
     use serde_json::Map;
+
+    #[tokio::test]
+    async fn test_parse_rejects_oversized_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("connection accepted");
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let body = vec![b'x'; MAX_RESPONSE_BYTES + 1];
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("headers written");
+            stream.write_all(&body).await.expect("body written");
+        });
+        let endpoint = AgentEndpoint {
+            address: address.ip(),
+            port: address.port(),
+        };
+
+        let error = HttpAgentClient::new()
+            .health(&endpoint)
+            .await
+            .expect_err("oversized body fails");
+        server.await.expect("server exits");
+
+        assert_eq!(error.code, "AGENT_RESPONSE_LIMIT");
+    }
+
+    #[test]
+    fn test_validate_node_info_rejects_oversized_fields() {
+        let response = NodeInfoResponse {
+            node_id: "node".to_owned(),
+            hostname: "x".repeat(MAX_NODE_FIELD_BYTES + 1),
+            omarchy_version: "4.0.0".to_owned(),
+            agent_version: "0.1.0".to_owned(),
+            protocol_versions: vec![1],
+            capabilities: Vec::new(),
+        };
+
+        let error = validate_node_info(response).expect_err("oversized field fails");
+
+        assert_eq!(error.code, "AGENT_FIELD_LIMIT");
+    }
+
+    #[test]
+    fn test_validate_node_info_rejects_too_many_capabilities() {
+        let response = NodeInfoResponse {
+            node_id: "node".to_owned(),
+            hostname: "host".to_owned(),
+            omarchy_version: "4.0.0".to_owned(),
+            agent_version: "0.1.0".to_owned(),
+            protocol_versions: vec![1],
+            capabilities: vec!["capability".to_owned(); MAX_CAPABILITIES + 1],
+        };
+
+        let error = validate_node_info(response).expect_err("too many capabilities fail");
+
+        assert_eq!(error.code, "AGENT_FIELD_LIMIT");
+    }
 
     #[test]
     fn test_http_error_keeps_public_message_user_friendly() {
