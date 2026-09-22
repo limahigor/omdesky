@@ -74,6 +74,7 @@ fn state_error(error: impl std::fmt::Display) -> PortError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omdesky_core::ControlCapability;
     use time::OffsetDateTime;
 
     #[tokio::test]
@@ -81,11 +82,12 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = FileAccessStore::new(directory.path().join("access/allowlist.json"));
         store
-            .allow(AllowedController {
-                tailnet_node_id: "node-abc".to_owned(),
-                label: Some("desktop-a".to_owned()),
-                added_at: OffsetDateTime::UNIX_EPOCH,
-            })
+            .allow(AllowedController::new(
+                "node-abc",
+                Some("desktop-a".to_owned()),
+                OffsetDateTime::UNIX_EPOCH,
+                ControlCapability::ALL,
+            ))
             .await
             .expect("identity allowed");
 
@@ -98,11 +100,12 @@ mod tests {
     async fn test_allow_is_idempotent_per_identity() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = FileAccessStore::new(directory.path().join("access/allowlist.json"));
-        let controller = AllowedController {
-            tailnet_node_id: "node-abc".to_owned(),
-            label: None,
-            added_at: OffsetDateTime::UNIX_EPOCH,
-        };
+        let controller = AllowedController::new(
+            "node-abc",
+            None,
+            OffsetDateTime::UNIX_EPOCH,
+            ControlCapability::ALL,
+        );
         store.allow(controller.clone()).await.expect("first");
         store.allow(controller).await.expect("second");
 

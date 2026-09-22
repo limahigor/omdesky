@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use omdesky_core::{
-    ConnectionKind, Display, DisplayId, InputMode, MeshPeer, NodeId, RemoteCommand,
-    RemoteDesktopTopology, SessionRole, StreamProfile, Window, Workspace, WorkspaceTarget,
+    ConnectionKind, ControlCapability, Display, DisplayId, InputMode, MeshPeer, NodeId,
+    RemoteCommand, RemoteDesktopTopology, SessionRole, StreamProfile, Window, Workspace,
+    WorkspaceTarget,
 };
 use omdesky_protocol::{
-    ActiveWindowResponse, HealthResponse, NodeInfoResponse, SunshinePairRequest,
-    SunshineStatusResponse,
+    ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
+    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse,
 };
 use std::{collections::BTreeMap, net::IpAddr, path::PathBuf, time::Duration};
 use time::OffsetDateTime;
@@ -183,6 +184,38 @@ pub struct AllowedController {
     pub tailnet_node_id: String,
     pub label: Option<String>,
     pub added_at: OffsetDateTime,
+    #[serde(default = "AllowedController::legacy_capabilities")]
+    pub capabilities: Vec<ControlCapability>,
+}
+
+impl AllowedController {
+    /// Entries written before capabilities existed were granted every control
+    /// action, so they keep that grant instead of silently losing access.
+    fn legacy_capabilities() -> Vec<ControlCapability> {
+        ControlCapability::ALL.to_vec()
+    }
+
+    pub fn new(
+        tailnet_node_id: impl Into<String>,
+        label: Option<String>,
+        added_at: OffsetDateTime,
+        capabilities: impl IntoIterator<Item = ControlCapability>,
+    ) -> Self {
+        let mut capabilities: Vec<_> = capabilities.into_iter().collect();
+        capabilities.sort();
+        capabilities.dedup();
+
+        Self {
+            tailnet_node_id: tailnet_node_id.into(),
+            label,
+            added_at,
+            capabilities,
+        }
+    }
+
+    pub fn allows(&self, capability: ControlCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +316,10 @@ pub trait AgentClient: Send + Sync {
     async fn focus_window(&self, endpoint: &AgentEndpoint, window: &str) -> PortResult<()>;
     async fn sunshine_status(&self, endpoint: &AgentEndpoint)
     -> PortResult<SunshineStatusResponse>;
+    async fn sunshine_pair_challenge(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<SunshinePairChallengeResponse>;
     async fn sunshine_pair(
         &self,
         endpoint: &AgentEndpoint,
@@ -292,8 +329,8 @@ pub trait AgentClient: Send + Sync {
     async fn send_command(
         &self,
         endpoint: &AgentEndpoint,
-        command: RemoteCommand,
-    ) -> PortResult<()>;
+        request: CommandRequest,
+    ) -> PortResult<CommandResponse>;
 }
 
 #[async_trait]

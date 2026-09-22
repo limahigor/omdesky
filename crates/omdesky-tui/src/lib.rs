@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
@@ -12,8 +14,8 @@ use omdesky_application::{
     },
 };
 use omdesky_core::{
-    CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, RemoteCommand,
-    StreamProfile, WindowSelector,
+    CodecPreference, ConnectionKind, ControlCapability, DisplayMode, InputMode, NodeStatus,
+    RemoteCommand, StreamProfile, WindowSelector, bitrate_kbps_from_mbps,
 };
 use omdesky_platform::{
     access::FileAccessStore,
@@ -998,11 +1000,12 @@ fn handle_overlay_key(
                 if let Some(node) = state.selected_remote() {
                     start_access_allow(
                         services.access.clone(),
-                        AllowedController {
-                            tailnet_node_id: node.tailnet_node_id.clone(),
-                            label: Some(node.name.clone()),
-                            added_at: OffsetDateTime::now_utc(),
-                        },
+                        AllowedController::new(
+                            node.tailnet_node_id.clone(),
+                            Some(node.name.clone()),
+                            OffsetDateTime::now_utc(),
+                            ControlCapability::ALL,
+                        ),
                         sender.clone(),
                     );
                     state.notice = Some(format!("Allowed {} to control this device", node.name));
@@ -1223,13 +1226,24 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
 }
 
 fn stream_profile(config: &Config) -> StreamProfile {
-    StreamProfile {
+    let bitrate_kbps = (config.stream.bitrate_mbps > 0)
+        .then(|| bitrate_kbps_from_mbps(config.stream.bitrate_mbps).ok())
+        .flatten();
+
+    let profile = StreamProfile {
         width: config.stream.width,
         height: config.stream.height,
         fps: config.stream.fps,
         codec_preference: config.stream.codec,
         audio: config.stream.audio,
-        bitrate_kbps: (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps * 1000),
+        bitrate_kbps,
+    };
+
+    if profile.validate().is_ok() {
+        profile
+    } else {
+        tracing::debug!("config.stream_profile_out_of_range");
+        StreamProfile::default()
     }
 }
 

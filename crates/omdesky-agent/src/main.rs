@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::{Context, Result};
 use omdesky_agent::{AgentState, router};
 use omdesky_application::ports::MeshNetwork;

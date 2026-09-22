@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod access;
 pub mod agent_client;
 pub mod config;

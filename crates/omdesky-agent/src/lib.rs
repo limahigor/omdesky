@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Path, Query, State},
@@ -229,7 +231,7 @@ async fn run_command(
 
     if command.is_session_control() {
         apply_session_command(&state, command).await?;
-        return Ok(Json(CommandResponse { executed: true }));
+        return Ok(Json(CommandResponse::executed()));
     }
 
     match current_role(&state) {
@@ -254,9 +256,9 @@ async fn run_command(
 
             state
                 .agent_client
-                .send_command(&controller, command)
+                .send_command(&controller, CommandRequest::new(command))
                 .await?;
-            Ok(Json(CommandResponse { executed: true }))
+            Ok(Json(CommandResponse::executed()))
         }
         _ => {
             if let RemoteCommand::SwitchStreamDisplay { display } = command {
@@ -300,7 +302,7 @@ async fn run_command(
 
                 tracing::info!("controller.switch_display.dispatched");
 
-                return Ok(Json(CommandResponse { executed: true }));
+                return Ok(Json(CommandResponse::executed()));
             }
 
             let notification = controller_command_notification(&command);
@@ -311,7 +313,7 @@ async fn run_command(
                 let _ = state.notifications.send(notification).await;
             }
 
-            Ok(Json(CommandResponse { executed: true }))
+            Ok(Json(CommandResponse::executed()))
         }
     }
 }
@@ -339,7 +341,8 @@ fn controller_command_notification(command: &RemoteCommand) -> Option<Notificati
         RemoteCommand::CloseWindow { .. } => "The remote session was closed",
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => return None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => return None,
     };
 
     Some(Notification {

@@ -1748,6 +1748,8 @@ dependencies = [
  "omdesky-core",
  "serde",
  "serde_json",
+ "time",
+ "uuid",
 ]
 
 [[package]]

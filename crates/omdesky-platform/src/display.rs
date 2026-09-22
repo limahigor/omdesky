@@ -6,6 +6,7 @@ use omdesky_application::ports::{
 use omdesky_core::{
     Display, DisplayId, KeyChord, KeyModifier, RemoteCommand, RemoteDesktopTopology, WindowSelector,
 };
+use omdesky_protocol::CommandRequest;
 use std::{path::Path, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -99,7 +100,11 @@ impl StreamDisplayController for MoonlightDisplayController {
         let command = RemoteCommand::SwitchStreamDisplay {
             display: target.clone(),
         };
-        self.agent.send_command(&self.controller, command).await
+
+        self.agent
+            .send_command(&self.controller, CommandRequest::new(command))
+            .await
+            .map(|_| ())
     }
 }
 

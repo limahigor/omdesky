@@ -1,3 +1,7 @@
+#![forbid(unsafe_code)]
+
+pub mod text;
+
 use serde::{Deserialize, Serialize};
 use std::{fmt, net::IpAddr, str::FromStr};
 use thiserror::Error;
@@ -395,6 +399,7 @@ impl KeyChord {
 pub enum WindowSelector {
     ActiveWindow,
     Class(String),
+    Address(String),
 }
 
 impl WindowSelector {
@@ -408,6 +413,13 @@ impl WindowSelector {
                     Err(DomainError::InvalidWindowSelector)
                 }
             }
+            WindowSelector::Address(address) => {
+                if is_window_address(address) {
+                    Ok(())
+                } else {
+                    Err(DomainError::InvalidWindowSelector)
+                }
+            }
         }
     }
 
@@ -415,8 +427,20 @@ impl WindowSelector {
         match self {
             WindowSelector::ActiveWindow => "activewindow".to_owned(),
             WindowSelector::Class(class) => format!("class:{class}"),
+            WindowSelector::Address(address) => format!("address:{address}"),
         }
     }
+
+    pub fn identifies_one_window(&self) -> bool {
+        matches!(self, WindowSelector::Address(_))
+    }
+}
+
+pub fn is_window_address(value: &str) -> bool {
+    value.len() <= 34
+        && value.strip_prefix("0x").is_some_and(|hex| {
+            !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit())
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -442,6 +466,84 @@ impl SessionEndpoint {
     }
 }
 
+/// Proof that the caller holds the session it is trying to mutate. The agent
+/// issues the pair in a `SessionGrant`; a caller cannot guess or predict it,
+/// and the generation fences operations issued against a superseded session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionClaim {
+    pub id: SessionId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionGrant {
+    pub id: SessionId,
+    pub generation: u64,
+    pub lease_seconds: u64,
+}
+
+impl SessionGrant {
+    pub fn claim(&self) -> SessionClaim {
+        SessionClaim {
+            id: self.id,
+            generation: self.generation,
+        }
+    }
+}
+
+/// A single permission an allowed controller may hold. Reading the desktop
+/// topology, moving focus, owning input and approving stream pairing are
+/// separate grants so an allowlist entry never implies more than it states.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlCapability {
+    ReadMetadata,
+    FocusWorkspace,
+    ControlSession,
+    SendShortcut,
+    CloseStream,
+    ApprovePairing,
+}
+
+impl ControlCapability {
+    pub const ALL: [Self; 6] = [
+        Self::ReadMetadata,
+        Self::FocusWorkspace,
+        Self::ControlSession,
+        Self::SendShortcut,
+        Self::CloseStream,
+        Self::ApprovePairing,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlCapability::ReadMetadata => "read_metadata",
+            ControlCapability::FocusWorkspace => "focus_workspace",
+            ControlCapability::ControlSession => "control_session",
+            ControlCapability::SendShortcut => "send_shortcut",
+            ControlCapability::CloseStream => "close_stream",
+            ControlCapability::ApprovePairing => "approve_pairing",
+        }
+    }
+}
+
+impl fmt::Display for ControlCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ControlCapability {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        ControlCapability::ALL
+            .into_iter()
+            .find(|capability| capability.as_str() == value)
+            .ok_or(DomainError::UnknownCapability)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RemoteCommand {
@@ -461,6 +563,7 @@ pub enum RemoteCommand {
         controller: Option<SessionEndpoint>,
     },
     DetachSession,
+    RenewSession,
 }
 
 impl RemoteCommand {
@@ -471,6 +574,7 @@ impl RemoteCommand {
             RemoteCommand::SwitchStreamDisplay { .. } => "switch_stream_display",
             RemoteCommand::AttachSession { .. } => "attach_session",
             RemoteCommand::DetachSession => "detach_session",
+            RemoteCommand::RenewSession => "renew_session",
         }
     }
 
@@ -489,15 +593,43 @@ impl RemoteCommand {
                     .and_then(SessionEndpoint::validate),
                 SessionRole::Controller => Ok(()),
             },
-            RemoteCommand::DetachSession => Ok(()),
+            RemoteCommand::DetachSession | RemoteCommand::RenewSession => Ok(()),
         }
     }
 
     pub fn is_session_control(&self) -> bool {
         matches!(
             self,
-            RemoteCommand::AttachSession { .. } | RemoteCommand::DetachSession
+            RemoteCommand::AttachSession { .. }
+                | RemoteCommand::DetachSession
+                | RemoteCommand::RenewSession
         )
+    }
+
+    /// The permission an allowed controller must hold to issue this command.
+    pub fn required_capability(&self) -> ControlCapability {
+        match self {
+            RemoteCommand::SendShortcut { .. } | RemoteCommand::SwitchStreamDisplay { .. } => {
+                ControlCapability::SendShortcut
+            }
+            RemoteCommand::CloseWindow { .. } => ControlCapability::CloseStream,
+            RemoteCommand::AttachSession { .. }
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => ControlCapability::ControlSession,
+        }
+    }
+
+    /// Whether repeating the command has the same effect as issuing it once.
+    /// Non-idempotent commands must carry a fresh, single-use request id.
+    pub fn is_idempotent(&self) -> bool {
+        match self {
+            RemoteCommand::SendShortcut { .. } => false,
+            RemoteCommand::CloseWindow { .. }
+            | RemoteCommand::SwitchStreamDisplay { .. }
+            | RemoteCommand::AttachSession { .. }
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => true,
+        }
     }
 
     pub fn controller_exclusive(&self) -> bool {
@@ -505,7 +637,9 @@ impl RemoteCommand {
             RemoteCommand::SendShortcut { .. }
             | RemoteCommand::CloseWindow { .. }
             | RemoteCommand::SwitchStreamDisplay { .. } => false,
-            RemoteCommand::AttachSession { .. } | RemoteCommand::DetachSession => false,
+            RemoteCommand::AttachSession { .. }
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => false,
         }
     }
 }
@@ -536,6 +670,40 @@ pub struct StreamProfile {
     pub audio: bool,
 
     pub bitrate_kbps: Option<u32>,
+}
+
+pub const MIN_STREAM_WIDTH: u32 = 320;
+pub const MAX_STREAM_WIDTH: u32 = 7680;
+pub const MIN_STREAM_HEIGHT: u32 = 240;
+pub const MAX_STREAM_HEIGHT: u32 = 4320;
+pub const MIN_STREAM_FPS: u16 = 15;
+pub const MAX_STREAM_FPS: u16 = 480;
+pub const MIN_STREAM_BITRATE_KBPS: u32 = 500;
+pub const MAX_STREAM_BITRATE_KBPS: u32 = 500_000;
+
+impl StreamProfile {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let within_range = (MIN_STREAM_WIDTH..=MAX_STREAM_WIDTH).contains(&self.width)
+            && (MIN_STREAM_HEIGHT..=MAX_STREAM_HEIGHT).contains(&self.height)
+            && (MIN_STREAM_FPS..=MAX_STREAM_FPS).contains(&self.fps)
+            && self.bitrate_kbps.is_none_or(|kbps| {
+                (MIN_STREAM_BITRATE_KBPS..=MAX_STREAM_BITRATE_KBPS).contains(&kbps)
+            });
+
+        if within_range {
+            Ok(())
+        } else {
+            Err(DomainError::InvalidStreamProfile)
+        }
+    }
+}
+
+/// Convert a megabit budget to the kilobits Moonlight expects, rejecting values
+/// that would overflow or ask for an unusable stream.
+pub fn bitrate_kbps_from_mbps(mbps: u32) -> Result<u32, DomainError> {
+    mbps.checked_mul(1000)
+        .filter(|kbps| (MIN_STREAM_BITRATE_KBPS..=MAX_STREAM_BITRATE_KBPS).contains(kbps))
+        .ok_or(DomainError::InvalidStreamProfile)
 }
 
 impl Default for StreamProfile {
@@ -646,6 +814,10 @@ pub enum DomainError {
     InvalidSessionEndpoint,
     #[error("display identifier is not a safe monitor token")]
     InvalidDisplayId,
+    #[error("stream profile is outside the supported resolution, frame rate or bitrate range")]
+    InvalidStreamProfile,
+    #[error("unknown control capability")]
+    UnknownCapability,
 }
 
 #[cfg(test)]
@@ -751,6 +923,146 @@ mod tests {
 
         assert!(selector.validate().is_ok());
         assert_eq!(selector.as_hypr(), "class:com.moonlight_stream.Moonlight");
+    }
+
+    #[test]
+    fn test_window_selector_address_targets_exactly_one_window() {
+        let selector = WindowSelector::Address("0x55c9ab12".to_owned());
+
+        assert!(selector.validate().is_ok());
+        assert!(selector.identifies_one_window());
+        assert_eq!(selector.as_hypr(), "address:0x55c9ab12");
+        assert!(
+            !WindowSelector::Class("com.moonlight_stream.Moonlight".to_owned())
+                .identifies_one_window()
+        );
+    }
+
+    #[test]
+    fn test_window_selector_rejects_unsafe_address() {
+        assert_eq!(
+            WindowSelector::Address("0x55; rm -rf /".to_owned()).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+        assert_eq!(
+            WindowSelector::Address("moonlight".to_owned()).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+        assert_eq!(
+            WindowSelector::Address(format!("0x{}", "a".repeat(64))).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+    }
+
+    #[test]
+    fn test_capabilities_round_trip_through_their_wire_names() {
+        for capability in ControlCapability::ALL {
+            assert_eq!(
+                capability.as_str().parse::<ControlCapability>(),
+                Ok(capability)
+            );
+        }
+
+        assert_eq!(
+            "root_shell".parse::<ControlCapability>(),
+            Err(DomainError::UnknownCapability)
+        );
+    }
+
+    #[test]
+    fn test_commands_require_their_narrowest_capability() {
+        assert_eq!(
+            RemoteCommand::DetachSession.required_capability(),
+            ControlCapability::ControlSession
+        );
+        assert_eq!(
+            RemoteCommand::CloseWindow {
+                window: WindowSelector::ActiveWindow
+            }
+            .required_capability(),
+            ControlCapability::CloseStream
+        );
+        assert_eq!(
+            RemoteCommand::SwitchStreamDisplay {
+                display: DisplayId::from("DP-2")
+            }
+            .required_capability(),
+            ControlCapability::SendShortcut
+        );
+    }
+
+    #[test]
+    fn test_shortcut_injection_is_not_idempotent() {
+        let shortcut = RemoteCommand::SendShortcut {
+            chord: KeyChord::new([KeyModifier::Ctrl], "Z").expect("valid chord"),
+            window: WindowSelector::ActiveWindow,
+        };
+
+        assert!(!shortcut.is_idempotent());
+        assert!(RemoteCommand::DetachSession.is_idempotent());
+    }
+
+    #[test]
+    fn test_renew_session_is_session_control() {
+        let command: RemoteCommand =
+            serde_json::from_str(r#"{"action":"renew_session"}"#).expect("valid renew_session");
+
+        assert!(command.is_session_control());
+        assert_eq!(command.kind(), "renew_session");
+        assert!(command.validate().is_ok());
+    }
+
+    #[test]
+    fn test_session_grant_yields_a_matching_claim() {
+        let grant = SessionGrant {
+            id: SessionId::new(),
+            generation: 7,
+            lease_seconds: 30,
+        };
+
+        assert_eq!(
+            grant.claim(),
+            SessionClaim {
+                id: grant.id,
+                generation: 7
+            }
+        );
+    }
+
+    #[test]
+    fn test_stream_profile_rejects_out_of_range_geometry() {
+        let mut profile = StreamProfile::default();
+        assert!(profile.validate().is_ok());
+
+        profile.width = 0;
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+
+        let mut profile = StreamProfile {
+            fps: 1_000,
+            ..StreamProfile::default()
+        };
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+
+        profile.fps = 60;
+        profile.bitrate_kbps = Some(u32::MAX);
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+    }
+
+    #[test]
+    fn test_bitrate_conversion_rejects_overflow_and_out_of_range_values() {
+        assert_eq!(bitrate_kbps_from_mbps(25), Ok(25_000));
+        assert_eq!(
+            bitrate_kbps_from_mbps(u32::MAX),
+            Err(DomainError::InvalidStreamProfile)
+        );
+        assert_eq!(
+            bitrate_kbps_from_mbps(4_300_000),
+            Err(DomainError::InvalidStreamProfile)
+        );
+        assert_eq!(
+            bitrate_kbps_from_mbps(0),
+            Err(DomainError::InvalidStreamProfile)
+        );
     }
 
     #[test]

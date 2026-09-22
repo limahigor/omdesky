@@ -6,9 +6,9 @@ use crate::ports::{
 use futures::{StreamExt, stream};
 use omdesky_core::{
     ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
-    SessionEndpoint, SessionRole, SessionState, StreamProfile, WorkspaceTarget,
+    SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile, WorkspaceTarget,
 };
-use omdesky_protocol::{PROTOCOL_V1, SunshinePairRequest};
+use omdesky_protocol::{CommandRequest, PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
 use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
 
@@ -348,9 +348,12 @@ impl ConnectNode {
         .await?;
         let process = self.stream.launch(stream_request).await?;
 
+        let mut grant = None;
+
         if request.input_mode == InputMode::Remote {
             match self.attach_session(&request).await {
-                Ok(()) => {
+                Ok(session) => {
+                    grant = Some(session);
                     let _ = self
                         .notifications
                         .send(Notification {
@@ -389,8 +392,8 @@ impl ConnectNode {
         )
         .await;
 
-        if request.input_mode == InputMode::Remote {
-            match self.detach_session(&request).await {
+        if let Some(grant) = grant {
+            match self.detach_session(&request, grant).await {
                 Ok(()) => {
                     let _ = self
                         .notifications
@@ -421,7 +424,7 @@ impl ConnectNode {
         exit
     }
 
-    async fn attach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+    async fn attach_session(&self, request: &ConnectRequest) -> PortResult<SessionGrant> {
         self.keybinds
             .install(SessionKeybindConfig {
                 role: SessionRole::Controller,
@@ -434,32 +437,47 @@ impl ConnectNode {
             port: request.controller_endpoint.port,
         };
 
-        if let Err(error) = self
+        let attach = self
             .agent
             .send_command(
                 &request.endpoint,
-                RemoteCommand::AttachSession {
+                CommandRequest::new(RemoteCommand::AttachSession {
                     role: SessionRole::Remote,
                     controller: Some(controller),
-                },
+                }),
             )
-            .await
-        {
-            let _ = self.keybinds.clear().await;
-            return Err(error);
-        }
+            .await;
 
-        Ok(())
+        match attach {
+            Ok(response) => response.session.ok_or_else(|| {
+                PortError::new(
+                    "SESSION_NOT_GRANTED",
+                    "the remote agent accepted the session without issuing a lease",
+                    false,
+                )
+            }),
+            Err(error) => {
+                let _ = self.keybinds.clear().await;
+                Err(error)
+            }
+        }
     }
 
-    async fn detach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+    async fn detach_session(
+        &self,
+        request: &ConnectRequest,
+        grant: SessionGrant,
+    ) -> PortResult<()> {
         let local = self.keybinds.clear().await;
         let remote = self
             .agent
-            .send_command(&request.endpoint, RemoteCommand::DetachSession)
+            .send_command(
+                &request.endpoint,
+                CommandRequest::for_session(RemoteCommand::DetachSession, grant.claim()),
+            )
             .await;
 
-        local.and(remote)
+        local.and(remote.map(|_| ()))
     }
 }
 

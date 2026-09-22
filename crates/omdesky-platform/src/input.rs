@@ -128,7 +128,7 @@ impl HyprlandCommandExecutor {
     async fn send_shortcut(&self, chord: &KeyChord, window: &WindowSelector) -> PortResult<()> {
         let previous = match window {
             WindowSelector::ActiveWindow => None,
-            WindowSelector::Class(_) => {
+            WindowSelector::Class(_) | WindowSelector::Address(_) => {
                 let output = self
                     .run_hyprland(CommandSpec::new(
                         "hyprctl",
@@ -147,6 +147,7 @@ impl HyprlandCommandExecutor {
             target_kind = match window {
                 WindowSelector::ActiveWindow => "active",
                 WindowSelector::Class(_) => "class",
+                WindowSelector::Address(_) => "address",
             },
             restores_focus = previous.is_some(),
             "hyprland.shortcut.dispatch"
@@ -177,7 +178,8 @@ impl CommandExecutor for HyprlandCommandExecutor {
             }
             RemoteCommand::SwitchStreamDisplay { .. }
             | RemoteCommand::AttachSession { .. }
-            | RemoteCommand::DetachSession => Err(PortError::new(
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => Err(PortError::new(
                 "COMMAND_NOT_EXECUTABLE",
                 "command is not an action",
                 false,
@@ -243,7 +245,9 @@ fn timed_shortcut_lua(
 ) -> String {
     let focus = match window {
         WindowSelector::ActiveWindow => String::new(),
-        WindowSelector::Class(_) => format!("hl.dispatch({}); ", focus_dispatcher(window)),
+        WindowSelector::Class(_) | WindowSelector::Address(_) => {
+            format!("hl.dispatch({}); ", focus_dispatcher(window))
+        }
     };
 
     if chord.key() == "Z" {
@@ -349,17 +353,23 @@ fn command_actions(command: &RemoteCommand, held_modifiers: &[KeyModifier]) -> O
         )]),
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => None,
+    }
+}
+
+fn window_cli_argument(window: &WindowSelector) -> String {
+    match window {
+        WindowSelector::Class(class) => format!(" --window-class {class}"),
+        WindowSelector::Address(address) => format!(" --window-address {address}"),
+        WindowSelector::ActiveWindow => String::new(),
     }
 }
 
 fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> Option<String> {
     match command {
         RemoteCommand::SendShortcut { chord, window } => {
-            let window_arg = match window {
-                WindowSelector::Class(class) => format!(" --window-class {class}"),
-                WindowSelector::ActiveWindow => String::new(),
-            };
+            let window_arg = window_cli_argument(window);
 
             Some(format!(
                 "omdesky command send-shortcut {address} --port {port} --mods '{mods}' --key {key}{window_arg}",
@@ -370,10 +380,7 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
             ))
         }
         RemoteCommand::CloseWindow { window } => {
-            let window_arg = match window {
-                WindowSelector::Class(class) => format!(" --window-class {class}"),
-                WindowSelector::ActiveWindow => String::new(),
-            };
+            let window_arg = window_cli_argument(window);
 
             Some(format!(
                 "omdesky command close-window {address} --port {port}{window_arg}",
@@ -383,7 +390,8 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
         }
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => None,
     }
 }
 
@@ -414,7 +422,8 @@ hl.timer(function() hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key 
         }
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => return None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => return None,
     };
     #[cfg(debug_assertions)]
     return Some(format!(

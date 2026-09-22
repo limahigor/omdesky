@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{AgentClient, AgentEndpoint, PortError, PortResult};
-use omdesky_core::{Display, RemoteCommand, Window, Workspace, WorkspaceTarget};
+use omdesky_core::{Display, Window, Workspace, WorkspaceTarget};
 use omdesky_protocol::{
-    ActiveWindowResponse, CommandRequest, DisplaysResponse, ErrorEnvelope, FocusWorkspaceRequest,
-    HealthResponse, NodeInfoResponse, SunshinePairRequest, SunshineStatusResponse, WindowsResponse,
-    WorkspacesResponse,
+    ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
+    FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, SunshinePairChallengeResponse,
+    SunshinePairRequest, SunshineStatusResponse, WindowsResponse, WorkspacesResponse,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -175,6 +175,18 @@ impl AgentClient for HttpAgentClient {
         self.get(endpoint, "/v1/sunshine", REQUEST_TIMEOUT).await
     }
 
+    async fn sunshine_pair_challenge(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<SunshinePairChallengeResponse> {
+        self.post_json(
+            endpoint,
+            "/v1/sunshine/pair/challenge",
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     async fn sunshine_pair(
         &self,
         endpoint: &AgentEndpoint,
@@ -189,12 +201,9 @@ impl AgentClient for HttpAgentClient {
     async fn send_command(
         &self,
         endpoint: &AgentEndpoint,
-        command: RemoteCommand,
-    ) -> PortResult<()> {
-        let _: omdesky_protocol::CommandResponse = self
-            .post_json(endpoint, "/v1/commands", &CommandRequest { command })
-            .await?;
-        Ok(())
+        request: CommandRequest,
+    ) -> PortResult<CommandResponse> {
+        self.post_json(endpoint, "/v1/commands", &request).await
     }
 }
 

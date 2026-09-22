@@ -1,9 +1,20 @@
-use omdesky_core::{Display, RemoteCommand, Window, Workspace, WorkspaceTarget};
+#![forbid(unsafe_code)]
+
+use omdesky_core::{
+    ControlCapability, Display, RemoteCommand, SessionClaim, SessionGrant, Window, Workspace,
+    WorkspaceTarget,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 pub const PROTOCOL_V1: u16 = 1;
 pub const SUPPORTED_PROTOCOLS: &[u16] = &[PROTOCOL_V1];
+
+pub const MAX_PAIRING_ID_BYTES: usize = 64;
+pub const MAX_PIN_BYTES: usize = 16;
+pub const MAX_CLIENT_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -53,14 +64,67 @@ pub struct FocusResponse {
     pub focused: bool,
 }
 
+/// A command plus the envelope the agent needs to decide whether to apply it:
+/// which session the caller believes it owns, a single-use request identifier,
+/// and when the caller issued the request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub command: RemoteCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionClaim>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub issued_at: Option<OffsetDateTime>,
+}
+
+impl CommandRequest {
+    pub fn new(command: RemoteCommand) -> Self {
+        Self {
+            command,
+            session: None,
+            request_id: Some(Uuid::new_v4()),
+            issued_at: Some(OffsetDateTime::now_utc()),
+        }
+    }
+
+    pub fn for_session(command: RemoteCommand, session: SessionClaim) -> Self {
+        Self {
+            session: Some(session),
+            ..Self::new(command)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub executed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionGrant>,
+}
+
+impl CommandResponse {
+    pub fn executed() -> Self {
+        Self {
+            executed: true,
+            session: None,
+        }
+    }
+
+    pub fn ignored() -> Self {
+        Self {
+            executed: false,
+            session: None,
+        }
+    }
+
+    pub fn granted(session: SessionGrant) -> Self {
+        Self {
+            executed: true,
+            session: Some(session),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -74,6 +138,15 @@ pub struct SunshineStatusResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SunshinePairChallengeResponse {
+    pub pairing_id: String,
+    pub expires_in_seconds: u64,
+}
+
+/// `pairing_id` is the single-use challenge the agent issued to this caller.
+/// `Debug` is implemented by hand so the PIN never reaches a log or a panic
+/// message.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SunshinePairRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_id: Option<String>,
@@ -81,9 +154,75 @@ pub struct SunshinePairRequest {
     pub client_name: String,
 }
 
+impl SunshinePairRequest {
+    pub fn validate(&self) -> Result<(), PairingFieldError> {
+        if !(self.pin.len() == 4 && self.pin.chars().all(|digit| digit.is_ascii_digit())) {
+            return Err(PairingFieldError::Pin);
+        }
+
+        let client_name_valid = !self.client_name.is_empty()
+            && self.client_name.len() <= MAX_CLIENT_NAME_BYTES
+            && self
+                .client_name
+                .chars()
+                .all(|character| character.is_ascii_graphic() || character == ' ');
+
+        if !client_name_valid {
+            return Err(PairingFieldError::ClientName);
+        }
+
+        let pairing_id_valid = self.pairing_id.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_PAIRING_ID_BYTES
+                && id
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        });
+
+        if !pairing_id_valid {
+            return Err(PairingFieldError::PairingId);
+        }
+
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for SunshinePairRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SunshinePairRequest")
+            .field("pairing_id", &self.pairing_id)
+            .field("pin", &"<redacted>")
+            .field("client_name", &self.client_name)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingFieldError {
+    Pin,
+    ClientName,
+    PairingId,
+}
+
+impl PairingFieldError {
+    pub fn code(self) -> &'static str {
+        match self {
+            PairingFieldError::Pin => "INVALID_PAIRING_PIN",
+            PairingFieldError::ClientName => "INVALID_PAIRING_CLIENT",
+            PairingFieldError::PairingId => "INVALID_PAIRING_CHALLENGE",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SunshinePairResponse {
     pub paired: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CapabilitiesResponse {
+    pub capabilities: Vec<ControlCapability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -204,6 +343,99 @@ mod tests {
 
         assert_eq!(value["command"]["action"], "send_shortcut");
         assert_eq!(value["command"]["chord"]["key"], "Z");
+    }
+
+    #[test]
+    fn test_command_request_carries_freshness_and_session_claim() {
+        let claim = omdesky_core::SessionClaim {
+            id: omdesky_core::SessionId::new(),
+            generation: 3,
+        };
+        let request = CommandRequest::for_session(RemoteCommand::DetachSession, claim);
+        let value = serde_json::to_value(&request).expect("serializable request");
+
+        assert_eq!(value["session"]["generation"], 3);
+        assert!(value["request_id"].is_string());
+        assert!(value["issued_at"].is_string());
+
+        let decoded: CommandRequest =
+            serde_json::from_value(value).expect("round trips through the wire format");
+        assert_eq!(decoded.session, Some(claim));
+    }
+
+    #[test]
+    fn test_command_request_tolerates_a_bare_command() {
+        let request: CommandRequest =
+            serde_json::from_str(r#"{"command":{"action":"detach_session"}}"#)
+                .expect("bare command still parses");
+
+        assert_eq!(request.session, None);
+        assert_eq!(request.request_id, None);
+        assert_eq!(request.issued_at, None);
+    }
+
+    #[test]
+    fn test_command_response_reports_a_session_grant() {
+        let grant = omdesky_core::SessionGrant {
+            id: omdesky_core::SessionId::new(),
+            generation: 1,
+            lease_seconds: 30,
+        };
+        let value = serde_json::to_value(CommandResponse::granted(grant)).expect("serializable");
+
+        assert_eq!(value["executed"], true);
+        assert_eq!(value["session"]["lease_seconds"], 30);
+        assert!(
+            serde_json::to_value(CommandResponse::ignored())
+                .expect("serializable")
+                .get("session")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_pairing_request_rejects_malformed_fields() {
+        let valid = SunshinePairRequest {
+            pairing_id: Some("ab-12".to_owned()),
+            pin: "1234".to_owned(),
+            client_name: "desktop-a".to_owned(),
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let long_pin = SunshinePairRequest {
+            pin: "12345".to_owned(),
+            ..valid.clone()
+        };
+        assert_eq!(long_pin.validate(), Err(PairingFieldError::Pin));
+
+        let hostile_name = SunshinePairRequest {
+            client_name: "desk\u{1b}[2Jtop".to_owned(),
+            ..valid.clone()
+        };
+        assert_eq!(hostile_name.validate(), Err(PairingFieldError::ClientName));
+
+        let hostile_challenge = SunshinePairRequest {
+            pairing_id: Some("../../etc".to_owned()),
+            ..valid
+        };
+        assert_eq!(
+            hostile_challenge.validate(),
+            Err(PairingFieldError::PairingId)
+        );
+    }
+
+    #[test]
+    fn test_pairing_request_debug_never_reveals_the_pin() {
+        let request = SunshinePairRequest {
+            pairing_id: None,
+            pin: "4821".to_owned(),
+            client_name: "desktop-a".to_owned(),
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(!rendered.contains("4821"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]

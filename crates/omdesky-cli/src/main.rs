@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use omdesky_application::{
@@ -8,8 +10,8 @@ use omdesky_application::{
     services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream, ensure_controller_ready},
 };
 use omdesky_core::{
-    CodecPreference, DisplayId, InputMode, KeyChord, KeyModifier, NodeId, RemoteCommand,
-    StreamProfile, WindowSelector, WorkspaceTarget,
+    CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, NodeId,
+    RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget, bitrate_kbps_from_mbps,
 };
 use omdesky_platform::{
     access::FileAccessStore,
@@ -27,7 +29,7 @@ use omdesky_platform::{
     sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
-use omdesky_protocol::SunshinePairRequest;
+use omdesky_protocol::{CommandRequest, SunshinePairRequest};
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
@@ -191,8 +193,11 @@ enum CommandAction {
         #[arg(long)]
         key: String,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "window_address")]
         window_class: Option<String>,
+
+        #[arg(long)]
+        window_address: Option<String>,
 
         #[arg(long)]
         port: Option<u16>,
@@ -200,8 +205,11 @@ enum CommandAction {
     CloseWindow {
         target: String,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "window_address")]
         window_class: Option<String>,
+
+        #[arg(long)]
+        window_address: Option<String>,
 
         #[arg(long)]
         port: Option<u16>,
@@ -220,8 +228,15 @@ enum CommandAction {
 #[derive(Subcommand)]
 enum AccessCommand {
     List,
-    Allow { peer: String },
-    Revoke { peer: String },
+    Allow {
+        peer: String,
+
+        #[arg(long = "capability", value_name = "CAPABILITY")]
+        capabilities: Vec<String>,
+    },
+    Revoke {
+        peer: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -485,6 +500,29 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     };
     let focus_workspace = args.workspace.as_deref().map(parse_workspace_target);
 
+    let bitrate_mbps = args
+        .bitrate
+        .or_else(|| (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps));
+    let bitrate_kbps = bitrate_mbps
+        .map(bitrate_kbps_from_mbps)
+        .transpose()
+        .context("invalid stream bitrate")?;
+
+    let profile = StreamProfile {
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        codec_preference: match args.codec {
+            CodecArg::Auto => CodecPreference::Auto,
+            CodecArg::H264 => CodecPreference::H264,
+            CodecArg::Hevc => CodecPreference::Hevc,
+            CodecArg::Av1 => CodecPreference::Av1,
+        },
+        audio: !args.no_audio,
+        bitrate_kbps,
+    };
+    profile.validate().context("invalid stream profile")?;
+
     let session_path = runtime_session_path().ok();
     write_session(session_path.as_deref(), &args.target, input_mode);
 
@@ -492,24 +530,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
         .execute(ConnectRequest {
             endpoint: endpoint.clone(),
             controller_endpoint,
-            profile: StreamProfile {
-                width: args.width,
-                height: args.height,
-                fps: args.fps,
-                codec_preference: match args.codec {
-                    CodecArg::Auto => CodecPreference::Auto,
-                    CodecArg::H264 => CodecPreference::H264,
-                    CodecArg::Hevc => CodecPreference::Hevc,
-                    CodecArg::Av1 => CodecPreference::Av1,
-                },
-                audio: !args.no_audio,
-                bitrate_kbps: args
-                    .bitrate
-                    .or_else(|| {
-                        (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps)
-                    })
-                    .map(|mbps| mbps * 1000),
-            },
+            profile,
             fullscreen: args.fullscreen || !args.windowed,
             input_mode,
             focus_workspace,
@@ -608,22 +629,37 @@ async fn access(command: AccessCommand) -> Result<()> {
     match command {
         AccessCommand::List => {
             for entry in store.list().await? {
+                let capabilities = entry
+                    .capabilities
+                    .iter()
+                    .map(|capability| capability.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+
                 println!(
-                    "{}\t{}",
+                    "{}\t{}\t{}",
                     entry.tailnet_node_id,
-                    entry.label.as_deref().unwrap_or("—")
+                    entry.label.as_deref().unwrap_or("—"),
+                    capabilities
                 );
             }
         }
-        AccessCommand::Allow { peer } => {
+        AccessCommand::Allow {
+            peer,
+            capabilities: requested,
+        } => {
+            let capabilities = parse_capabilities(&requested)?;
             let identity = resolve_tailnet_identity(&peer).await?;
+
             store
-                .allow(AllowedController {
-                    tailnet_node_id: identity,
-                    label: Some(peer.clone()),
-                    added_at: OffsetDateTime::now_utc(),
-                })
+                .allow(AllowedController::new(
+                    identity,
+                    Some(peer.clone()),
+                    OffsetDateTime::now_utc(),
+                    capabilities,
+                ))
                 .await?;
+
             println!("Allowed {peer}");
         }
         AccessCommand::Revoke { peer } => {
@@ -821,6 +857,7 @@ async fn remote_command(action: CommandAction) -> Result<()> {
             mods,
             key,
             window_class,
+            window_address,
             port,
         } => {
             let endpoint = match (target.parse::<IpAddr>(), port) {
@@ -830,12 +867,14 @@ async fn remote_command(action: CommandAction) -> Result<()> {
 
             let modifiers = parse_modifiers(&mods)?;
             let chord = KeyChord::new(modifiers, key).context("invalid key chord")?;
-            let window = window_class.map_or(WindowSelector::ActiveWindow, WindowSelector::Class);
+            let window = window_selector(window_class, window_address);
 
             let command = RemoteCommand::SendShortcut { chord, window };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
@@ -843,6 +882,7 @@ async fn remote_command(action: CommandAction) -> Result<()> {
         CommandAction::CloseWindow {
             target,
             window_class,
+            window_address,
             port,
         } => {
             let endpoint = match (target.parse::<IpAddr>(), port) {
@@ -850,12 +890,14 @@ async fn remote_command(action: CommandAction) -> Result<()> {
                 _ => resolve_endpoint(&target).await?,
             };
 
-            let window = window_class.map_or(WindowSelector::ActiveWindow, WindowSelector::Class);
+            let window = window_selector(window_class, window_address);
 
             let command = RemoteCommand::CloseWindow { window };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
@@ -875,12 +917,45 @@ async fn remote_command(action: CommandAction) -> Result<()> {
             };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
         }
     }
+}
+
+fn window_selector(class: Option<String>, address: Option<String>) -> WindowSelector {
+    match (class, address) {
+        (_, Some(address)) => WindowSelector::Address(address),
+        (Some(class), None) => WindowSelector::Class(class),
+        (None, None) => WindowSelector::ActiveWindow,
+    }
+}
+
+fn parse_capabilities(values: &[String]) -> Result<Vec<ControlCapability>> {
+    if values.is_empty() {
+        return Ok(ControlCapability::ALL.to_vec());
+    }
+
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token.parse::<ControlCapability>().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown capability '{token}'; expected one of {}",
+                    ControlCapability::ALL
+                        .map(ControlCapability::as_str)
+                        .join(", ")
+                )
+            })
+        })
+        .collect()
 }
 
 fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>> {
