@@ -14,7 +14,7 @@ Everything Omdesky does is available from the terminal interface. Run `omdesky` 
 - Choose the resolution, frame rate, codec, bitrate, and window mode
 - Follow the focused monitor while working on a multi-monitor desktop
 - Inspect remote displays, workspaces, and windows from the command line
-- Limit access to specific Tailscale devices
+- Limit access to specific Tailscale devices, per capability
 
 ## Requirements
 
@@ -98,10 +98,13 @@ Run these commands on the computer you want to control:
 
 ```bash
 omdesky setup
+omdesky access allow controller-hostname
 systemctl --user enable --now omdesky-agent.service
 ```
 
 `omdesky setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
+
+`omdesky access allow` is required, not optional. The agent refuses every control request until the controller is listed. Run it on the controller too, naming this computer, because the remote desktop sends shortcut and display-switch commands back.
 
 Check the setup with:
 

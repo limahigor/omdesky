@@ -132,9 +132,9 @@ omdesky disconnect
 
 The terminal interface manages its own session and does not create a command-line session record.
 
-## Restrict access
+## Allow a controller
 
-Tailscale controls which devices can reach the agent. Omdesky can add a second local restriction on the remote computer:
+Tailscale controls which devices can reach the agent. Omdesky decides which of them may actually control it, and it decides by an explicit list:
 
 ```bash
 omdesky access allow controller-hostname
@@ -142,7 +142,15 @@ omdesky access list
 omdesky access revoke controller-hostname
 ```
 
-Once at least one controller is listed, other Tailscale devices are refused. Run these commands on each remote computer you want to protect.
+Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other.
+
+Narrow a grant with `--capability` when a device should do less than everything:
+
+```bash
+omdesky access allow laptop --capability read_metadata --capability focus_workspace
+```
+
+The available capabilities are `read_metadata`, `focus_workspace`, `control_session`, `send_shortcut`, `close_stream` and `approve_pairing`. See [Configuration and access control](configuration.md) for what each one covers.
 
 ## Troubleshooting
 

@@ -38,14 +38,29 @@ When you run `omdesky connect workstation`, Omdesky:
 
 For multi-monitor desktops, follow-focus watches which remote monitor has the focused window. It sends Moonlight's display-switch shortcut when the focus moves to another monitor.
 
+## Session ownership
+
+A stream that owns input is a session, and a session has exactly one owner.
+
+When the controller attaches, the agent issues a session identifier, a generation number and a lease. The owner is the Tailscale identity the request authenticated as, never a value taken from the message body. Every later change to that session presents the identifier and generation it was issued, so a message from a superseded session is ignored rather than applied, and another controller cannot take or end a live session.
+
+Attaching and detaching are serialized and ordered. Attach installs the keybindings before publishing the session and rolls them back if the install fails; detach clears them before removing the session, and keeps the session when cleanup fails so it can be retried.
+
+The controller renews the lease while the stream runs. If it stops renewing, for any reason including being killed, the lease expires and the agent removes the keybindings and restores local input. The agent clears leftover keybindings at startup and on shutdown as well.
+
+The controller resolves the Hyprland address of its own Moonlight window from the child process id, so focusing, closing and switching a display act on one specific stream even when several are open.
+
 ## Pairing
 
 Moonlight and Sunshine perform the actual pairing. Omdesky only carries the one-time PIN between them:
 
-1. Moonlight creates a four-digit PIN on the controller.
-2. The controller sends that PIN to the remote agent.
-3. The agent submits it to Sunshine on the same computer.
-4. Moonlight confirms that pairing succeeded.
+1. The controller asks the remote agent for a pairing challenge.
+2. Moonlight creates a four-digit PIN on the controller.
+3. The controller sends that PIN with the challenge to the remote agent.
+4. The agent checks that the challenge is one it issued to that identity, is unused and has not expired, then submits the PIN to Sunshine on the same computer.
+5. Moonlight confirms that pairing succeeded.
+
+The challenge is single-use and pairing is rate limited per identity, so an authorized device cannot flood Sunshine with PIN attempts. Approving a pairing needs the `approve_pairing` capability, which is separate from reading the desktop or moving focus.
 
 The Sunshine username and password remain on the remote computer. They are never sent to the controller.
 
@@ -53,7 +68,7 @@ The Sunshine username and password remain on the remote computer. They are never
 
 The agent listens on the local Tailscale address rather than a public network interface. Tailscale provides the private route and identifies the calling device.
 
-The health check is available to any device that can reach the port. Every other request must resolve to a Tailscale device identity. A local Omdesky allowlist can further restrict which Tailscale devices may control the computer.
+The health check is available to any device that can reach the port. Every other request must resolve to a Tailscale device identity **and** appear in the local Omdesky allowlist with the capability that request needs. A missing or empty allowlist accepts nobody.
 
 See [Configuration and access control](configuration.md) for setup instructions.
 
@@ -61,7 +76,9 @@ See [Configuration and access control](configuration.md) for setup instructions.
 
 The agent accepts only the actions Omdesky needs, such as listing displays, focusing a workspace, and managing a stream session. It does not provide a general remote shell or accept arbitrary Hyprland commands.
 
-External programs are launched with separate argument values rather than commands assembled for a shell. Sunshine credentials stay on the remote computer in the desktop user's Linux Secret Service collection and are loaded only when needed.
+External programs are launched with separate argument values rather than commands assembled for a shell, are resolved from a fixed set of system directories rather than `PATH`, and run with a trusted `PATH` and a reduced environment. Sunshine credentials stay on the remote computer in the desktop user's Linux Secret Service collection and are loaded only when needed.
+
+Text that another computer supplies — hostnames, window titles, display names, versions — is stripped of escape, control and bidirectional characters before it is displayed, so a hostile device cannot rewrite what you see in the terminal.
 
 ## Source layout
 

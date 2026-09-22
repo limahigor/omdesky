@@ -6,3 +6,8 @@
 /packaging/arch/*.tar.gz
 
 *.log
+
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/

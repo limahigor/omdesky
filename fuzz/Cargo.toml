@@ -1,0 +1,65 @@
+[package]
+name = "omdesky-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+omdesky-core = { path = "../crates/omdesky-core" }
+omdesky-platform = { path = "../crates/omdesky-platform" }
+omdesky-protocol = { path = "../crates/omdesky-protocol" }
+serde_json = "1"
+toml = "1"
+
+[[bin]]
+name = "tailscale_status"
+path = "fuzz_targets/tailscale_status.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tailscale_whois"
+path = "fuzz_targets/tailscale_whois.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hyprland_output"
+path = "fuzz_targets/hyprland_output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command_request"
+path = "fuzz_targets/command_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pairing_request"
+path = "fuzz_targets/pairing_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "local_state"
+path = "fuzz_targets/local_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "display_text"
+path = "fuzz_targets/display_text.rs"
+test = false
+doc = false
+bench = false
