@@ -3,7 +3,10 @@ use omdesky_application::ports::{
     CommandRunner, CommandSpec, ConnectionInfo, MeshNetwork, MeshNodeIdentity, PortError,
     PortResult,
 };
-use omdesky_core::{ConnectionKind, MeshPeer};
+use omdesky_core::{
+    ConnectionKind, MeshPeer,
+    text::{DISPLAY_NAME_LIMIT, sanitize_for_display, sanitize_optional},
+};
 use serde::Deserialize;
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
@@ -42,6 +45,8 @@ impl MeshNetwork for TailscaleAdapter {
             hostname: status
                 .self_node
                 .host_name
+                .as_deref()
+                .map(|hostname| sanitize_for_display(hostname, DISPLAY_NAME_LIMIT))
                 .or_else(|| status.self_node.dns_name.as_deref().map(dns_hostname)),
             addresses: status
                 .self_node
@@ -125,10 +130,18 @@ pub fn parse_whois(bytes: &[u8]) -> PortResult<MeshNodeIdentity> {
     })?;
     Ok(MeshNodeIdentity {
         tailnet_node_id: whois.node.stable_id.unwrap_or_default(),
-        user: whois.user_profile.and_then(|profile| profile.login_name),
+        user: sanitize_optional(
+            whois
+                .user_profile
+                .and_then(|profile| profile.login_name)
+                .as_deref(),
+            DISPLAY_NAME_LIMIT,
+        ),
         hostname: whois
             .node
             .host_name
+            .as_deref()
+            .map(|hostname| sanitize_for_display(hostname, DISPLAY_NAME_LIMIT))
             .or_else(|| whois.node.name.as_deref().map(dns_hostname)),
         addresses: Vec::new(),
     })
@@ -176,19 +189,20 @@ fn validate_peer(peer: &RawPeer) -> PortResult<()> {
 }
 
 fn dns_hostname(dns_name: &str) -> String {
-    dns_name
+    let hostname = dns_name
         .trim_end_matches('.')
         .split('.')
         .next()
-        .unwrap_or(dns_name)
-        .to_owned()
+        .unwrap_or(dns_name);
+
+    sanitize_for_display(hostname, DISPLAY_NAME_LIMIT)
 }
 
 fn raw_peer_to_domain(peer: RawPeer) -> MeshPeer {
     MeshPeer {
         tailnet_node_id: peer.id,
-        dns_name: peer.dns_name,
-        hostname: peer.host_name,
+        dns_name: sanitize_optional(peer.dns_name.as_deref(), DISPLAY_NAME_LIMIT),
+        hostname: sanitize_optional(peer.host_name.as_deref(), DISPLAY_NAME_LIMIT),
         ips: peer
             .tailscale_ips
             .into_iter()
@@ -305,6 +319,32 @@ mod tests {
 
         assert_eq!(identity.tailnet_node_id, "nABC123");
         assert_eq!(identity.user.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn test_hostile_peer_hostnames_are_stripped_of_terminal_controls() {
+        let status = parse_status(
+            br#"{"Self":{"ID":"self","TailscaleIPs":["100.64.0.2"]},"Peer":{"p":{"ID":"id","HostName":"desk\u001b]8;;https://evil.example\u0007top","TailscaleIPs":["100.64.0.3"],"Online":true}}}"#,
+        )
+        .expect("status parses");
+        let peer = raw_peer_to_domain(status.peers.into_values().next().expect("peer"));
+
+        let hostname = peer.hostname.expect("hostname");
+        assert!(!hostname.contains('\u{1b}'));
+        assert!(!hostname.contains('\u{7}'));
+        assert_eq!(peer.tailnet_node_id, "id");
+    }
+
+    #[test]
+    fn test_whois_identity_is_compared_byte_for_byte() {
+        let identity = parse_whois(
+            br#"{"Node":{"StableID":"nABC123","HostName":"desk\u001b[2Jtop"},"UserProfile":{"LoginName":"user\u001b@example.com"}}"#,
+        )
+        .expect("whois parses");
+
+        assert_eq!(identity.tailnet_node_id, "nABC123");
+        assert!(!identity.hostname.expect("hostname").contains('\u{1b}'));
+        assert!(!identity.user.expect("user").contains('\u{1b}'));
     }
 
     #[test]

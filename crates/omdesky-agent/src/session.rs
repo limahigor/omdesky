@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use omdesky_application::ports::{
     AgentEndpoint, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
 };
-use omdesky_core::{SessionClaim, SessionGrant, SessionId, SessionRole};
+use omdesky_core::{SessionClaim, SessionGrant, SessionId, SessionRole, WindowSelector};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
@@ -19,6 +19,7 @@ pub struct ActiveSession {
     pub owner: String,
     pub role: SessionRole,
     pub controller: Option<AgentEndpoint>,
+    pub window: WindowSelector,
 }
 
 #[async_trait]
@@ -111,6 +112,7 @@ impl SessionCoordinator {
         owner: &str,
         role: SessionRole,
         controller: Option<AgentEndpoint>,
+        window: WindowSelector,
     ) -> Result<SessionGrant, SessionError> {
         let mut state = self.state.lock().await;
 
@@ -130,6 +132,7 @@ impl SessionCoordinator {
             owner: owner.to_owned(),
             role,
             controller,
+            window,
         };
 
         if let Err(error) = self.effects.clear().await {
@@ -317,6 +320,7 @@ where
             .install(SessionKeybindConfig {
                 role: session.role,
                 controller: session.controller.clone(),
+                window: session.window.clone(),
             })
             .await?;
 
@@ -390,6 +394,10 @@ mod tests {
         }
     }
 
+    fn window() -> WindowSelector {
+        WindowSelector::Address("0x55aa".to_owned())
+    }
+
     fn endpoint() -> AgentEndpoint {
         AgentEndpoint {
             address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7)),
@@ -407,11 +415,11 @@ mod tests {
         let coordinator = coordinator(effects.clone());
 
         let first = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("first attach");
         let second = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("same owner may reattach");
 
@@ -426,12 +434,12 @@ mod tests {
         let coordinator = coordinator(effects.clone());
 
         coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("first attach");
 
         let error = coordinator
-            .attach("node-b", SessionRole::Remote, Some(endpoint()))
+            .attach("node-b", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect_err("the session is owned");
 
@@ -452,11 +460,11 @@ mod tests {
         let coordinator = coordinator(effects.clone());
 
         let stale = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("first attach");
         let current = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("second attach");
 
@@ -478,7 +486,7 @@ mod tests {
         let coordinator = coordinator(effects.clone());
 
         let grant = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("attach");
 
@@ -498,7 +506,7 @@ mod tests {
         let coordinator = coordinator(effects.clone());
 
         let error = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect_err("install fails");
 
@@ -512,7 +520,7 @@ mod tests {
         let effects = Arc::new(RecordingEffects::default());
         let coordinator = coordinator(effects.clone());
         let grant = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("attach");
 
@@ -541,7 +549,7 @@ mod tests {
         let effects = Arc::new(RecordingEffects::default());
         let coordinator = SessionCoordinator::new(effects.clone(), Duration::from_secs(30));
         coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("attach");
 
@@ -558,7 +566,7 @@ mod tests {
         let effects = Arc::new(RecordingEffects::default());
         let coordinator = SessionCoordinator::new(effects, Duration::from_secs(30));
         let grant = coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("attach");
 
@@ -586,14 +594,14 @@ mod tests {
         let effects = Arc::new(RecordingEffects::default());
         let coordinator = SessionCoordinator::new(effects, Duration::from_millis(1));
         coordinator
-            .attach("node-a", SessionRole::Remote, Some(endpoint()))
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("attach");
 
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let grant = coordinator
-            .attach("node-b", SessionRole::Remote, Some(endpoint()))
+            .attach("node-b", SessionRole::Remote, Some(endpoint()), window())
             .await
             .expect("an expired session may be taken over");
 

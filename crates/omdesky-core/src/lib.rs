@@ -555,6 +555,8 @@ pub enum RemoteCommand {
         role: SessionRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<SessionEndpoint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<WindowSelector>,
     },
     DetachSession,
     RenewSession,
@@ -580,13 +582,23 @@ impl RemoteCommand {
             }
             RemoteCommand::CloseWindow { window } => window.validate(),
             RemoteCommand::SwitchStreamDisplay { display } => display.validate(),
-            RemoteCommand::AttachSession { role, controller } => match role {
-                SessionRole::Remote => controller
-                    .as_ref()
-                    .ok_or(DomainError::InvalidSessionEndpoint)
-                    .and_then(SessionEndpoint::validate),
-                SessionRole::Controller => Ok(()),
-            },
+            RemoteCommand::AttachSession {
+                role,
+                controller,
+                window,
+            } => {
+                if let Some(window) = window {
+                    window.validate()?;
+                }
+
+                match role {
+                    SessionRole::Remote => controller
+                        .as_ref()
+                        .ok_or(DomainError::InvalidSessionEndpoint)
+                        .and_then(SessionEndpoint::validate),
+                    SessionRole::Controller => Ok(()),
+                }
+            }
             RemoteCommand::DetachSession | RemoteCommand::RenewSession => Ok(()),
         }
     }
@@ -1086,6 +1098,7 @@ mod tests {
         let remote_without_controller = RemoteCommand::AttachSession {
             role: SessionRole::Remote,
             controller: None,
+            window: None,
         };
         assert_eq!(
             remote_without_controller.validate(),
@@ -1095,6 +1108,7 @@ mod tests {
         let controller_role = RemoteCommand::AttachSession {
             role: SessionRole::Controller,
             controller: None,
+            window: None,
         };
         assert!(controller_role.validate().is_ok());
     }

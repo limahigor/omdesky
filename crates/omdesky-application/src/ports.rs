@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use omdesky_core::{
     ConnectionKind, ControlCapability, Display, DisplayId, InputMode, MeshPeer, NodeId,
-    RemoteCommand, RemoteDesktopTopology, SessionRole, StreamProfile, Window, Workspace,
-    WorkspaceTarget,
+    RemoteCommand, RemoteDesktopTopology, SessionRole, StreamProfile, Window, WindowSelector,
+    Workspace, WorkspaceTarget,
 };
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
@@ -388,12 +388,18 @@ pub trait CommandExecutor: Send + Sync {
 pub struct SessionKeybindConfig {
     pub role: SessionRole,
     pub controller: Option<AgentEndpoint>,
+    pub window: WindowSelector,
 }
 
 #[async_trait]
 pub trait SessionKeybindInstaller: Send + Sync {
     async fn install(&self, config: SessionKeybindConfig) -> PortResult<()>;
     async fn clear(&self) -> PortResult<()>;
+}
+
+#[async_trait]
+pub trait StreamWindowLocator: Send + Sync {
+    async fn window_for_process(&self, pid: u32) -> PortResult<Option<WindowSelector>>;
 }
 
 #[async_trait]

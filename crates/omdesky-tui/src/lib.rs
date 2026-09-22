@@ -7,10 +7,11 @@ use crossterm::event::{
 use omdesky_application::{
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork,
-        PortError,
+        PortError, StreamWindowLocator,
     },
     services::{
-        ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode, ensure_controller_ready,
+        ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode, MOONLIGHT_WINDOW_CLASS,
+        ensure_controller_ready,
     },
 };
 use omdesky_core::{
@@ -21,7 +22,8 @@ use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
     config::{Config, access_path, legacy_sunshine_credentials_path, state_dir},
-    input::{HyprlandCommandExecutor, HyprlandSessionKeybinds, MOONLIGHT_WINDOW_CLASS},
+    hyprland::HyprlandAdapter,
+    input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
     moonlight::MoonlightAdapter,
     omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
@@ -62,6 +64,7 @@ struct Services {
     stream: Arc<MoonlightAdapter>,
     notifications: Arc<OmarchyNotificationAdapter>,
     desktop: Arc<HyprlandCommandExecutor>,
+    windows: Arc<HyprlandAdapter>,
     access: Arc<FileAccessStore>,
     sunshine_credentials: SunshineCredentialStore,
     agent_port: u16,
@@ -86,7 +89,8 @@ impl Services {
             agent,
             stream: Arc::new(MoonlightAdapter::new(runner.clone())),
             notifications: Arc::new(OmarchyNotificationAdapter::default()),
-            desktop: Arc::new(HyprlandCommandExecutor::new(runner)),
+            desktop: Arc::new(HyprlandCommandExecutor::new(runner.clone())),
+            windows: Arc::new(HyprlandAdapter::new(runner)),
             access: Arc::new(FileAccessStore::new(access_path()?)),
             sunshine_credentials: SunshineCredentialStore::new(Some(
                 legacy_sunshine_credentials_path()?,
@@ -104,6 +108,7 @@ impl Services {
             self.notifications.clone(),
             self.client_name.clone(),
         )
+        .with_window_locator(self.windows.clone())
     }
 }
 
@@ -208,6 +213,7 @@ enum AsyncMessage {
         generation: u64,
         node_id: String,
         node_name: String,
+        moonlight_pid: Option<u32>,
     },
     SessionEnded {
         generation: u64,
@@ -227,6 +233,7 @@ struct AppState {
     loading: bool,
     activity: Activity,
     active_node_id: Option<String>,
+    active_moonlight_pid: Option<u32>,
     pending_node: Option<DiscoveredNode>,
     session_generation: u64,
     notice: Option<String>,
@@ -251,6 +258,7 @@ impl AppState {
             loading: false,
             activity: Activity::Idle,
             active_node_id: None,
+            active_moonlight_pid: None,
             pending_node: None,
             session_generation: 0,
             notice: None,
@@ -425,6 +433,7 @@ fn start_connect(
 
         let node_id = node.tailnet_node_id.clone();
         let node_name = node.name.clone();
+        let started_sender = sender.clone();
         let result = service
             .execute_with_started(
                 ConnectRequest {
@@ -437,12 +446,13 @@ fn start_connect(
                     focus_window: None,
                     auto_pair: true,
                 },
-                || async {
-                    let _ = sender
+                |moonlight_pid| async move {
+                    let _ = started_sender
                         .send(AsyncMessage::SessionStarted {
                             generation,
                             node_id,
                             node_name,
+                            moonlight_pid,
                         })
                         .await;
                 },
@@ -467,16 +477,32 @@ fn start_connect(
     });
 }
 
-fn start_focus(desktop: Arc<HyprlandCommandExecutor>, sender: mpsc::Sender<AsyncMessage>) {
+fn start_focus(
+    desktop: Arc<HyprlandCommandExecutor>,
+    windows: Arc<HyprlandAdapter>,
+    moonlight_pid: Option<u32>,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
     tokio::spawn(async move {
+        let window = stream_window(windows.as_ref(), moonlight_pid).await;
+
         let result = desktop
-            .focus_stream()
+            .focus_stream(&window)
             .await
             .map(|_| "Focused the active stream.".to_owned())
             .map_err(|error| user_error("The active stream could not be focused.", &error));
 
         let _ = sender.send(AsyncMessage::Focus(result)).await;
     });
+}
+
+async fn stream_window(windows: &HyprlandAdapter, moonlight_pid: Option<u32>) -> WindowSelector {
+    let resolved = match moonlight_pid {
+        Some(pid) => windows.window_for_process(pid).await.ok().flatten(),
+        None => None,
+    };
+
+    resolved.unwrap_or_else(|| WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()))
 }
 
 async fn local_agent_endpoint(port: u16) -> anyhow::Result<AgentEndpoint> {
@@ -636,9 +662,11 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
             generation,
             node_id,
             node_name,
+            moonlight_pid,
         } if generation == state.session_generation => {
             state.activity = Activity::Idle;
             state.active_node_id = Some(node_id);
+            state.active_moonlight_pid = moonlight_pid;
             state.notice = Some(format!("Connected to {node_name}."));
             state.error = None;
         }
@@ -650,6 +678,7 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
         } if generation == state.session_generation => {
             state.activity = Activity::Idle;
             state.active_node_id = None;
+            state.active_moonlight_pid = None;
             state.detail_expanded = false;
 
             if local_failure {
@@ -871,18 +900,25 @@ async fn handle_key(
                     SessionAction::Focus => {
                         state.notice = Some(format!("Focusing {}…", node.name));
                         state.error = None;
-                        start_focus(services.desktop.clone(), sender.clone());
+                        start_focus(
+                            services.desktop.clone(),
+                            services.windows.clone(),
+                            state.active_moonlight_pid,
+                            sender.clone(),
+                        );
                     }
                     SessionAction::Switch => {
                         state.pending_node = Some(node.clone());
                         state.notice = Some(format!("Switching to {}…", node.name));
                         state.error = None;
 
+                        let window =
+                            stream_window(services.windows.as_ref(), state.active_moonlight_pid)
+                                .await;
+
                         if let Err(error) = services
                             .desktop
-                            .execute(RemoteCommand::CloseWindow {
-                                window: WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()),
-                            })
+                            .execute(RemoteCommand::CloseWindow { window })
                             .await
                         {
                             state.pending_node = None;
@@ -2257,6 +2293,7 @@ mod tests {
             generation: 1,
             node_id: "tail-workstation".to_owned(),
             node_name: "workstation".to_owned(),
+            moonlight_pid: Some(4242),
         };
         let ended = AsyncMessage::SessionEnded {
             generation: 1,

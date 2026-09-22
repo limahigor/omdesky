@@ -12,6 +12,7 @@ use omdesky_application::{
 use omdesky_core::{
     CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, NodeId,
     RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget, bitrate_kbps_from_mbps,
+    text::{DISPLAY_NAME_LIMIT, sanitize_for_display},
 };
 use omdesky_platform::{
     access::FileAccessStore,
@@ -26,6 +27,7 @@ use omdesky_platform::{
     moonlight::MoonlightAdapter,
     omarchy::{OmarchyNotificationAdapter, detect_version},
     process::TokioCommandRunner,
+    session_record::{SessionRecord, SupervisedProcess},
     sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
@@ -524,23 +526,49 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     profile.validate().context("invalid stream profile")?;
 
     let session_path = runtime_session_path().ok();
-    write_session(session_path.as_deref(), &args.target, input_mode);
+    let mut record = SessionRecord::new(&args.target, input_mode);
+
+    if let Some(path) = &session_path
+        && let Err(error) = record.write(path)
+    {
+        tracing::debug!(detail = %error, "session.record_write_failed");
+    }
+
+    let record_path = session_path.clone();
+    let session_id = record.session_id;
 
     let exit = service
-        .execute(ConnectRequest {
-            endpoint: endpoint.clone(),
-            controller_endpoint,
-            profile,
-            fullscreen: args.fullscreen || !args.windowed,
-            input_mode,
-            focus_workspace,
-            focus_window: args.window.or(args.app_id),
-            auto_pair: true,
-        })
+        .execute_with_started(
+            ConnectRequest {
+                endpoint: endpoint.clone(),
+                controller_endpoint,
+                profile,
+                fullscreen: args.fullscreen || !args.windowed,
+                input_mode,
+                focus_workspace,
+                focus_window: args.window.or(args.app_id),
+                auto_pair: true,
+            },
+            move |moonlight_pid| {
+                let record_path = record_path.clone();
+
+                async move {
+                    let Some(path) = record_path else {
+                        return;
+                    };
+
+                    record.moonlight = moonlight_pid.and_then(SupervisedProcess::observe);
+
+                    if let Err(error) = record.write(&path) {
+                        tracing::debug!(detail = %error, "session.record_update_failed");
+                    }
+                }
+            },
+        )
         .await;
 
     if let Some(path) = &session_path {
-        let _ = std::fs::remove_file(path);
+        SessionRecord::remove_if_owned(path, session_id);
     }
 
     let exit = exit?;
@@ -570,9 +598,11 @@ async fn local_agent_endpoint(port: u16) -> Result<AgentEndpoint> {
 async fn input(command: InputCommand) -> Result<()> {
     match command {
         InputCommand::Status => {
-            let mode =
-                read_session().and_then(|value| value["input_mode"].as_str().map(str::to_owned));
-            println!("input mode: {}", mode.as_deref().unwrap_or("local"));
+            let mode = read_session().map_or("local", |record| match record.input_mode {
+                InputMode::Local => "local",
+                InputMode::Remote => "remote",
+            });
+            println!("input mode: {mode}");
             Ok(())
         }
         InputCommand::Local | InputCommand::Remote | InputCommand::Toggle => anyhow::bail!(
@@ -583,15 +613,20 @@ async fn input(command: InputCommand) -> Result<()> {
 
 async fn session(json: bool) -> Result<()> {
     match read_session() {
-        Some(value) => {
+        Some(record) => {
             if json {
-                println!("{value}");
+                println!("{}", serde_json::to_string_pretty(&record)?);
             } else {
                 println!(
                     "node {}  ·  pid {}  ·  input {}",
-                    value["remote_node"].as_str().unwrap_or("—"),
-                    value["moonlight_pid"].as_i64().unwrap_or(0),
-                    value["input_mode"].as_str().unwrap_or("local")
+                    sanitize_for_display(&record.remote_node, DISPLAY_NAME_LIMIT),
+                    record
+                        .moonlight
+                        .map_or_else(|| "—".to_owned(), |process| process.pid.to_string()),
+                    match record.input_mode {
+                        InputMode::Local => "local",
+                        InputMode::Remote => "remote",
+                    }
                 );
             }
             Ok(())
@@ -608,18 +643,24 @@ async fn session(json: bool) -> Result<()> {
 }
 
 async fn disconnect() -> Result<()> {
-    let value = read_session().context("no active Omdesky session to disconnect")?;
+    let path = runtime_session_path()?;
+    let record = SessionRecord::read(&path).context("no active Omdesky session to disconnect")?;
 
-    if let Some(pid) = value["moonlight_pid"].as_i64().filter(|pid| *pid > 0) {
-        terminate_process(pid as u32);
-        println!("Signalled Moonlight process {pid} to stop");
-    } else {
-        println!("Session has no supervised Moonlight process");
+    match record.moonlight {
+        Some(process) if process.is_still_running() => {
+            terminate_process(process.pid);
+            println!("Signalled Moonlight process {} to stop", process.pid);
+        }
+        Some(process) => {
+            println!(
+                "Moonlight process {} is no longer the one this session started; nothing was signalled",
+                process.pid
+            );
+        }
+        None => println!("Session has no supervised Moonlight process"),
     }
 
-    if let Ok(path) = runtime_session_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    SessionRecord::remove_if_owned(&path, record.session_id);
 
     Ok(())
 }
@@ -638,8 +679,8 @@ async fn access(command: AccessCommand) -> Result<()> {
 
                 println!(
                     "{}\t{}\t{}",
-                    entry.tailnet_node_id,
-                    entry.label.as_deref().unwrap_or("—"),
+                    sanitize_for_display(&entry.tailnet_node_id, DISPLAY_NAME_LIMIT),
+                    sanitize_for_display(entry.label.as_deref().unwrap_or("—"), DISPLAY_NAME_LIMIT),
                     capabilities
                 );
             }
@@ -1031,39 +1072,14 @@ async fn resolve_tailnet_identity(target: &str) -> Result<String> {
         .with_context(|| format!("no Tailnet peer matches '{target}'"))
 }
 
-fn write_session(path: Option<&std::path::Path>, node: &str, input_mode: InputMode) {
-    let Some(path) = path else {
-        return;
-    };
-
-    let record = json!({
-        "session_id": uuid_like(),
-        "remote_node": node,
-        "moonlight_pid": std::process::id(),
-        "input_mode": match input_mode {
-            InputMode::Local => "local",
-            InputMode::Remote => "remote",
-        },
-        "started_at": OffsetDateTime::now_utc().unix_timestamp(),
-    });
-
-    let _ = omdesky_platform::state::atomic_write_json(path, &record, false);
-}
-
-fn read_session() -> Option<serde_json::Value> {
-    let path = runtime_session_path().ok()?;
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn uuid_like() -> String {
-    uuid::Uuid::new_v4().to_string()
+fn read_session() -> Option<SessionRecord> {
+    SessionRecord::read(&runtime_session_path().ok()?).ok()
 }
 
 fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
+        let _ = std::process::Command::new("/usr/bin/kill")
             .arg(pid.to_string())
             .status();
     }

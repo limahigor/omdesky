@@ -17,9 +17,10 @@ use omdesky_application::ports::{
     AgentClient, AgentEndpoint, CommandExecutor, Notification, NotificationService, RemoteOmarchy,
     StreamHost,
 };
+use omdesky_application::services::MOONLIGHT_WINDOW_CLASS;
 use omdesky_core::{
     ControlCapability, DomainError, RemoteCommand, SessionClaim, SessionEndpoint, SessionRole,
-    Window, WorkspaceId, WorkspaceTarget,
+    Window, WindowSelector, WorkspaceId, WorkspaceTarget,
 };
 use omdesky_platform::display::{
     HyprlandDisplayTopology, MoonlightDisplayController, spawn_focus_signals,
@@ -405,14 +406,20 @@ async fn apply_session_command(
     claim: Option<SessionClaim>,
 ) -> Result<CommandResponse, ApiError> {
     match command {
-        RemoteCommand::AttachSession { role, controller } => {
+        RemoteCommand::AttachSession {
+            role,
+            controller,
+            window,
+        } => {
             let controller = controller
                 .map(|endpoint| callback_endpoint(endpoint, source))
                 .transpose()?;
+            let window =
+                window.unwrap_or_else(|| WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()));
 
             let grant = state
                 .sessions
-                .attach(&peer.tailnet_node_id, role, controller)
+                .attach(&peer.tailnet_node_id, role, controller, window)
                 .await
                 .map_err(session_error)?;
 

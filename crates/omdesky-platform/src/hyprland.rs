@@ -1,8 +1,12 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
     CommandRunner, CommandSpec, DesktopEnvironment, PortError, PortResult, RemoteOmarchy,
+    StreamWindowLocator,
 };
-use omdesky_core::{Display, InputMode, Window, WindowId, Workspace, WorkspaceId, WorkspaceTarget};
+use omdesky_core::{
+    Display, InputMode, Window, WindowId, WindowSelector, Workspace, WorkspaceId, WorkspaceTarget,
+    is_window_address,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -42,6 +46,15 @@ impl HyprlandAdapter {
             .map_err(|error| {
                 PortError::new("HYPRLAND_DISPATCH_FAILED", error.message, error.retryable)
             })
+    }
+}
+
+#[async_trait]
+impl StreamWindowLocator for HyprlandAdapter {
+    async fn window_for_process(&self, pid: u32) -> PortResult<Option<WindowSelector>> {
+        let clients = self.query("clients").await?;
+
+        Ok(window_address_for_process(&clients, pid)?.map(WindowSelector::Address))
     }
 }
 
@@ -150,6 +163,17 @@ pub fn parse_workspaces(bytes: &[u8]) -> PortResult<Vec<Workspace>> {
         .collect())
 }
 
+pub fn window_address_for_process(bytes: &[u8], pid: u32) -> PortResult<Option<String>> {
+    let clients: Vec<HyprClient> = serde_json::from_slice(bytes).map_err(hyprland_error)?;
+    let matching = clients
+        .into_iter()
+        .filter(|client| client.pid == Some(pid))
+        .map(|client| client.address)
+        .find(|address| is_window_address(address));
+
+    Ok(matching)
+}
+
 pub fn parse_windows(bytes: &[u8]) -> PortResult<Vec<Window>> {
     let clients: Vec<HyprClient> = serde_json::from_slice(bytes).map_err(hyprland_error)?;
     Ok(clients.into_iter().map(client_to_window).collect())
@@ -223,6 +247,8 @@ struct HyprWorkspace {
 struct HyprClient {
     address: String,
     #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
     class: Option<String>,
     #[serde(default)]
     initial_class: Option<String>,
@@ -281,6 +307,33 @@ mod tests {
     #[test]
     fn test_parse_active_window_handles_empty() {
         assert_eq!(parse_active_window(b"{}").expect("empty"), None);
+    }
+
+    #[test]
+    fn test_window_address_is_resolved_from_the_owning_process() {
+        let clients = br#"[
+            {"address":"0x55aa","pid":4242,"class":"com.moonlight_stream.Moonlight","workspace":{"id":1}},
+            {"address":"0x55bb","pid":4243,"class":"com.moonlight_stream.Moonlight","workspace":{"id":2}}
+        ]"#;
+
+        assert_eq!(
+            window_address_for_process(clients, 4243).expect("clients parse"),
+            Some("0x55bb".to_owned())
+        );
+        assert_eq!(
+            window_address_for_process(clients, 9999).expect("clients parse"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_window_address_ignores_a_client_with_an_unsafe_address() {
+        let clients = br#"[{"address":"0x55; rm -rf /","pid":4242,"workspace":{"id":1}}]"#;
+
+        assert_eq!(
+            window_address_for_process(clients, 4242).expect("clients parse"),
+            None
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use omdesky_application::ports::{
 };
 use omdesky_core::{
     ControlCapability, Display, MeshPeer, RemoteCommand, SessionEndpoint, SessionGrant,
-    SessionRole, Window, Workspace, WorkspaceTarget,
+    SessionRole, Window, WindowSelector, Workspace, WorkspaceTarget,
 };
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
@@ -353,6 +353,7 @@ async fn attach(state: &AgentState, source: SocketAddr) -> SessionGrant {
             "/v1/commands",
             &CommandRequest::new(RemoteCommand::AttachSession {
                 role: SessionRole::Remote,
+                window: Some(WindowSelector::Address("0x55aa".to_owned())),
                 controller: Some(SessionEndpoint {
                     address: source.ip(),
                     port: 48155,
@@ -434,6 +435,7 @@ async fn test_a_read_only_peer_cannot_take_a_session_or_approve_pairing() {
             "/v1/commands",
             &CommandRequest::new(RemoteCommand::AttachSession {
                 role: SessionRole::Remote,
+                window: Some(WindowSelector::Address("0x55aa".to_owned())),
                 controller: Some(SessionEndpoint {
                     address: peer_source().ip(),
                     port: 48155,
@@ -486,6 +488,7 @@ async fn test_a_replayed_command_is_rejected() {
     let state = state(vec![entry(PEER, &ControlCapability::ALL)]);
     let request = CommandRequest::new(RemoteCommand::AttachSession {
         role: SessionRole::Remote,
+        window: Some(WindowSelector::Address("0x55aa".to_owned())),
         controller: Some(SessionEndpoint {
             address: peer_source().ip(),
             port: 48155,
@@ -510,6 +513,7 @@ async fn test_a_callback_endpoint_must_match_the_calling_peer() {
             "/v1/commands",
             &CommandRequest::new(RemoteCommand::AttachSession {
                 role: SessionRole::Remote,
+                window: Some(WindowSelector::Address("0x55aa".to_owned())),
                 controller: Some(SessionEndpoint {
                     address: IpAddr::V4(Ipv4Addr::LOCALHOST),
                     port: 9000,
@@ -537,6 +541,7 @@ async fn test_a_second_controller_cannot_steal_or_end_a_live_session() {
             "/v1/commands",
             &CommandRequest::new(RemoteCommand::AttachSession {
                 role: SessionRole::Remote,
+                window: Some(WindowSelector::Address("0x55aa".to_owned())),
                 controller: Some(SessionEndpoint {
                     address: other_source().ip(),
                     port: 48155,

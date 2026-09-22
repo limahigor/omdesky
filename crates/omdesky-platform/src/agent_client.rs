@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{AgentClient, AgentEndpoint, PortError, PortResult};
-use omdesky_core::{Display, Window, Workspace, WorkspaceTarget};
+use omdesky_core::{
+    Display, Window, Workspace, WorkspaceTarget,
+    text::{DISPLAY_LINE_LIMIT, DISPLAY_NAME_LIMIT, sanitize_for_display, sanitize_optional},
+};
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
     FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, SunshinePairChallengeResponse,
@@ -122,24 +125,40 @@ impl AgentClient for HttpAgentClient {
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>> {
         let response: DisplaysResponse =
             self.get(endpoint, "/v1/displays", REQUEST_TIMEOUT).await?;
-        Ok(response.displays)
+
+        Ok(response
+            .displays
+            .into_iter()
+            .map(sanitize_display)
+            .collect())
     }
 
     async fn workspaces(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Workspace>> {
         let response: WorkspacesResponse = self
             .get(endpoint, "/v1/workspaces", REQUEST_TIMEOUT)
             .await?;
-        Ok(response.workspaces)
+
+        Ok(response
+            .workspaces
+            .into_iter()
+            .map(sanitize_workspace)
+            .collect())
     }
 
     async fn windows(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Window>> {
         let response: WindowsResponse = self.get(endpoint, "/v1/windows", REQUEST_TIMEOUT).await?;
-        Ok(response.windows)
+
+        Ok(response.windows.into_iter().map(sanitize_window).collect())
     }
 
     async fn active_window(&self, endpoint: &AgentEndpoint) -> PortResult<ActiveWindowResponse> {
-        self.get(endpoint, "/v1/windows/active", REQUEST_TIMEOUT)
-            .await
+        let response: ActiveWindowResponse = self
+            .get(endpoint, "/v1/windows/active", REQUEST_TIMEOUT)
+            .await?;
+
+        Ok(ActiveWindowResponse {
+            window: response.window.map(sanitize_window),
+        })
     }
 
     async fn focus_workspace(
@@ -207,6 +226,46 @@ impl AgentClient for HttpAgentClient {
     }
 }
 
+fn sanitize_display(display: Display) -> Display {
+    Display {
+        id: sanitize_for_display(&display.id, DISPLAY_NAME_LIMIT),
+        name: sanitize_for_display(&display.name, DISPLAY_NAME_LIMIT),
+        ..display
+    }
+}
+
+fn sanitize_workspace(workspace: Workspace) -> Workspace {
+    Workspace {
+        name: sanitize_optional(workspace.name.as_deref(), DISPLAY_NAME_LIMIT),
+        monitor: sanitize_optional(workspace.monitor.as_deref(), DISPLAY_NAME_LIMIT),
+        ..workspace
+    }
+}
+
+fn sanitize_window(window: Window) -> Window {
+    Window {
+        app_id: sanitize_optional(window.app_id.as_deref(), DISPLAY_NAME_LIMIT),
+        class: sanitize_optional(window.class.as_deref(), DISPLAY_NAME_LIMIT),
+        title: sanitize_optional(window.title.as_deref(), DISPLAY_LINE_LIMIT),
+        ..window
+    }
+}
+
+fn sanitize_node_info(response: NodeInfoResponse) -> NodeInfoResponse {
+    NodeInfoResponse {
+        node_id: sanitize_for_display(&response.node_id, DISPLAY_NAME_LIMIT),
+        hostname: sanitize_for_display(&response.hostname, DISPLAY_NAME_LIMIT),
+        omarchy_version: sanitize_for_display(&response.omarchy_version, DISPLAY_NAME_LIMIT),
+        agent_version: sanitize_for_display(&response.agent_version, DISPLAY_NAME_LIMIT),
+        capabilities: response
+            .capabilities
+            .iter()
+            .map(|capability| sanitize_for_display(capability, DISPLAY_NAME_LIMIT))
+            .collect(),
+        ..response
+    }
+}
+
 fn validate_node_info(response: NodeInfoResponse) -> PortResult<NodeInfoResponse> {
     let fields_are_valid = response.node_id.len() <= MAX_NODE_FIELD_BYTES
         && response.hostname.len() <= MAX_NODE_FIELD_BYTES
@@ -227,7 +286,7 @@ fn validate_node_info(response: NodeInfoResponse) -> PortResult<NodeInfoResponse
         ));
     }
 
-    Ok(response)
+    Ok(sanitize_node_info(response))
 }
 
 fn network_error(error: reqwest::Error) -> PortError {
@@ -348,6 +407,54 @@ mod tests {
         let error = validate_node_info(response).expect_err("too many capabilities fail");
 
         assert_eq!(error.code, "AGENT_FIELD_LIMIT");
+    }
+
+    #[test]
+    fn test_remote_metadata_cannot_carry_terminal_control_sequences() {
+        let response = sanitize_node_info(NodeInfoResponse {
+            node_id: "node".to_owned(),
+            hostname: "desk\u{1b}]8;;https://evil.example\u{7}top".to_owned(),
+            omarchy_version: "4.0.0\u{202e}".to_owned(),
+            agent_version: "0.1.1".to_owned(),
+            protocol_versions: vec![1],
+            capabilities: vec!["desktop.input\u{1b}[2J".to_owned()],
+        });
+
+        assert!(!response.hostname.contains('\u{1b}'));
+        assert!(!response.hostname.contains('\u{7}'));
+        assert!(!response.omarchy_version.contains('\u{202e}'));
+        assert!(!response.capabilities[0].contains('\u{1b}'));
+    }
+
+    #[test]
+    fn test_remote_window_titles_are_sanitized_but_handles_are_preserved() {
+        let window = sanitize_window(Window {
+            id: omdesky_core::WindowId("0x55aa".to_owned()),
+            app_id: Some("code\u{1b}[31m".to_owned()),
+            class: None,
+            title: Some("main\u{202e}txt.exe".to_owned()),
+            workspace: omdesky_core::WorkspaceId(1),
+            focused: false,
+        });
+
+        assert_eq!(window.id, omdesky_core::WindowId("0x55aa".to_owned()));
+        assert!(!window.app_id.expect("app id").contains('\u{1b}'));
+        assert!(!window.title.expect("title").contains('\u{202e}'));
+    }
+
+    #[test]
+    fn test_remote_display_names_are_sanitized() {
+        let display = sanitize_display(Display {
+            id: "DP-2".to_owned(),
+            name: "external\u{1b}[2J".to_owned(),
+            width: 2560,
+            height: 1440,
+            refresh_hz: 144.0,
+            focused: true,
+        });
+
+        assert_eq!(display.id, "DP-2");
+        assert!(!display.name.contains('\u{1b}'));
     }
 
     #[test]

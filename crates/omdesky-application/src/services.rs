@@ -1,16 +1,19 @@
 use crate::ports::{
     AgentClient, AgentEndpoint, ChildProcess, MeshNetwork, Notification, NotificationService,
     PairingState, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
-    StreamClient, StreamHostDescriptor, StreamLaunchRequest,
+    StreamClient, StreamHostDescriptor, StreamLaunchRequest, StreamWindowLocator,
 };
 use futures::{StreamExt, stream};
 use omdesky_core::{
     ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
-    SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile, WorkspaceTarget,
+    SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile, WindowSelector,
+    WorkspaceTarget,
 };
 use omdesky_protocol::{CommandRequest, PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
 use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
+
+pub const MOONLIGHT_WINDOW_CLASS: &str = "com.moonlight_stream.Moonlight";
 
 const MAX_DISCOVERY_PEERS: usize = 1024;
 const DISCOVERY_CONCURRENCY: usize = 16;
@@ -213,12 +216,14 @@ impl PairStream {
             ));
         }
 
+        let challenge = self.agent.sunshine_pair_challenge(endpoint).await?;
         let pending = self.stream.begin_pairing(&host).await?;
+
         self.agent
             .sunshine_pair(
                 endpoint,
                 SunshinePairRequest {
-                    pairing_id: None,
+                    pairing_id: Some(challenge.pairing_id),
                     pin: pending.pin,
                     client_name: self.client_name.clone(),
                 },
@@ -247,11 +252,16 @@ pub struct ConnectRequest {
     pub auto_pair: bool,
 }
 
+pub const STREAM_WINDOW_LOOKUP_ATTEMPTS: u32 = 20;
+pub const STREAM_WINDOW_LOOKUP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 pub struct ConnectNode {
     agent: Arc<dyn AgentClient>,
     stream: Arc<dyn StreamClient>,
     keybinds: Arc<dyn SessionKeybindInstaller>,
     notifications: Arc<dyn NotificationService>,
+    windows: Option<Arc<dyn StreamWindowLocator>>,
     pairing: PairStream,
 }
 
@@ -269,8 +279,45 @@ impl ConnectNode {
             stream,
             keybinds,
             notifications,
+            windows: None,
             pairing,
         }
+    }
+
+    pub fn with_window_locator(mut self, windows: Arc<dyn StreamWindowLocator>) -> Self {
+        self.windows = Some(windows);
+
+        self
+    }
+
+    async fn locate_stream_window(&self, pid: Option<u32>) -> WindowSelector {
+        let fallback = WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned());
+
+        let (Some(windows), Some(pid)) = (self.windows.as_ref(), pid) else {
+            return fallback;
+        };
+
+        for _ in 0..STREAM_WINDOW_LOOKUP_ATTEMPTS {
+            match windows.window_for_process(pid).await {
+                Ok(Some(window)) => return window,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        code = error.code,
+                        detail = %error.message,
+                        "session.window_lookup_failed"
+                    );
+
+                    return fallback;
+                }
+            }
+
+            tokio::time::sleep(STREAM_WINDOW_LOOKUP_INTERVAL).await;
+        }
+
+        tracing::warn!("session.window_lookup_timed_out");
+
+        fallback
     }
 
     pub async fn displays(
@@ -281,7 +328,7 @@ impl ConnectNode {
     }
 
     pub async fn execute(&self, request: ConnectRequest) -> PortResult<i32> {
-        self.execute_with_started(request, || async {}).await
+        self.execute_with_started(request, |_| async {}).await
     }
 
     pub async fn execute_with_started<F, Fut>(
@@ -290,7 +337,7 @@ impl ConnectNode {
         on_started: F,
     ) -> PortResult<i32>
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(Option<u32>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let status = self.agent.sunshine_status(&request.endpoint).await?;
@@ -347,12 +394,21 @@ impl ConnectNode {
         )
         .await?;
         let process = self.stream.launch(stream_request).await?;
+        let moonlight_pid = process.id();
 
         let mut grant = None;
+        let mut heartbeat = None;
 
         if request.input_mode == InputMode::Remote {
-            match self.attach_session(&request).await {
+            let window = self.locate_stream_window(moonlight_pid).await;
+
+            match self.attach_session(&request, window).await {
                 Ok(session) => {
+                    heartbeat = Some(SessionHeartbeat::spawn(
+                        self.agent.clone(),
+                        request.endpoint.clone(),
+                        session,
+                    ));
                     grant = Some(session);
                     let _ = self
                         .notifications
@@ -380,7 +436,7 @@ impl ConnectNode {
             }
         }
 
-        on_started().await;
+        on_started(moonlight_pid).await;
 
         let exit = wait_for_process_or_monitor(
             process,
@@ -391,6 +447,8 @@ impl ConnectNode {
             ),
         )
         .await;
+
+        drop(heartbeat);
 
         if let Some(grant) = grant {
             match self.detach_session(&request, grant).await {
@@ -424,11 +482,16 @@ impl ConnectNode {
         exit
     }
 
-    async fn attach_session(&self, request: &ConnectRequest) -> PortResult<SessionGrant> {
+    async fn attach_session(
+        &self,
+        request: &ConnectRequest,
+        window: WindowSelector,
+    ) -> PortResult<SessionGrant> {
         self.keybinds
             .install(SessionKeybindConfig {
                 role: SessionRole::Controller,
                 controller: None,
+                window: window.clone(),
             })
             .await?;
 
@@ -444,6 +507,7 @@ impl ConnectNode {
                 CommandRequest::new(RemoteCommand::AttachSession {
                     role: SessionRole::Remote,
                     controller: Some(controller),
+                    window: Some(window),
                 }),
             )
             .await;
@@ -483,6 +547,54 @@ impl ConnectNode {
 
 const AGENT_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const AGENT_HEALTH_FAILURE_LIMIT: u8 = 2;
+
+const MIN_RENEWAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub struct SessionHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl SessionHeartbeat {
+    fn spawn(agent: Arc<dyn AgentClient>, endpoint: AgentEndpoint, grant: SessionGrant) -> Self {
+        let interval = renewal_interval(grant.lease_seconds);
+
+        Self {
+            handle: tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.tick().await;
+
+                loop {
+                    ticker.tick().await;
+
+                    let renewal = agent
+                        .send_command(
+                            &endpoint,
+                            CommandRequest::for_session(RemoteCommand::RenewSession, grant.claim()),
+                        )
+                        .await;
+
+                    if let Err(error) = renewal {
+                        tracing::debug!(
+                            code = error.code,
+                            detail = %error.message,
+                            "session.renewal_failed"
+                        );
+                    }
+                }
+            }),
+        }
+    }
+}
+
+impl Drop for SessionHeartbeat {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn renewal_interval(lease_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(lease_seconds.max(1) / 3).max(MIN_RENEWAL_INTERVAL)
+}
 
 fn agent_health_failure(
     local_failures: u8,
