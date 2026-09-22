@@ -1,7 +1,14 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result};
-use omdesky_agent::{AgentState, router};
+use omdesky_agent::{
+    AgentState, FollowFocusSupervisor,
+    authorize::Authorizer,
+    pairing::PairingChallenges,
+    replay::ReplayGuard,
+    router,
+    session::{DEFAULT_LEASE, KeybindSessionEffects, SessionCoordinator, run_lease_expiry},
+};
 use omdesky_application::ports::MeshNetwork;
 use omdesky_platform::{
     access::FileAccessStore,
@@ -18,11 +25,7 @@ use omdesky_platform::{
     tailscale::TailscaleAdapter,
 };
 use omdesky_protocol::NodeInfoResponse;
-use std::{
-    env,
-    net::SocketAddr,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{env, net::SocketAddr, sync::Arc};
 #[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
@@ -102,18 +105,32 @@ async fn main() -> Result<()> {
         ],
     };
 
+    let follow_focus =
+        FollowFocusSupervisor::new(agent_client.clone(), desktop.clone(), notifications.clone());
+    let effects = Arc::new(KeybindSessionEffects::new(keybinds, move |controller| {
+        follow_focus.set_controller(controller)
+    }));
+    let sessions = Arc::new(SessionCoordinator::new(effects, DEFAULT_LEASE));
+
+    if let Err(error) = sessions.reconcile().await {
+        tracing::warn!(
+            code = error.code,
+            detail = %error.message,
+            "agent.startup_reconciliation_failed"
+        );
+    }
+
     let state = AgentState {
         node,
         desktop,
         sunshine,
-        mesh,
-        access,
         commands,
-        keybinds,
         agent_client,
         notifications,
-        session: Arc::new(RwLock::new(None)),
-        follow_focus: Arc::new(Mutex::new(None)),
+        authorizer: Arc::new(Authorizer::new(mesh, access)),
+        sessions: sessions.clone(),
+        challenges: Arc::new(PairingChallenges::default()),
+        replay: Arc::new(ReplayGuard::default()),
         agent_port: config.network.agent_port,
     };
 
@@ -123,12 +140,47 @@ async fn main() -> Result<()> {
 
     tracing::info!(%address, port = config.network.agent_port, "agent.started");
 
-    axum::serve(
+    let expiry = tokio::spawn(run_lease_expiry(sessions.clone()));
+
+    let served = axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await
-    .context("serve agent")
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
+
+    expiry.abort();
+    sessions.release().await;
+
+    served.context("serve agent")
+}
+
+async fn shutdown_signal() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            std::future::pending::<()>().await;
+            return;
+        };
+
+        signal.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+
+    tracing::info!("agent.shutdown_requested");
 }
 
 fn is_tailscale_address(address: std::net::IpAddr) -> bool {
