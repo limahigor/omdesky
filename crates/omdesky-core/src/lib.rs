@@ -466,9 +466,6 @@ impl SessionEndpoint {
     }
 }
 
-/// Proof that the caller holds the session it is trying to mutate. The agent
-/// issues the pair in a `SessionGrant`; a caller cannot guess or predict it,
-/// and the generation fences operations issued against a superseded session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionClaim {
     pub id: SessionId,
@@ -491,9 +488,6 @@ impl SessionGrant {
     }
 }
 
-/// A single permission an allowed controller may hold. Reading the desktop
-/// topology, moving focus, owning input and approving stream pairing are
-/// separate grants so an allowlist entry never implies more than it states.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlCapability {
@@ -606,7 +600,6 @@ impl RemoteCommand {
         )
     }
 
-    /// The permission an allowed controller must hold to issue this command.
     pub fn required_capability(&self) -> ControlCapability {
         match self {
             RemoteCommand::SendShortcut { .. } | RemoteCommand::SwitchStreamDisplay { .. } => {
@@ -619,8 +612,6 @@ impl RemoteCommand {
         }
     }
 
-    /// Whether repeating the command has the same effect as issuing it once.
-    /// Non-idempotent commands must carry a fresh, single-use request id.
     pub fn is_idempotent(&self) -> bool {
         match self {
             RemoteCommand::SendShortcut { .. } => false,
@@ -698,8 +689,6 @@ impl StreamProfile {
     }
 }
 
-/// Convert a megabit budget to the kilobits Moonlight expects, rejecting values
-/// that would overflow or ask for an unusable stream.
 pub fn bitrate_kbps_from_mbps(mbps: u32) -> Result<u32, DomainError> {
     mbps.checked_mul(1000)
         .filter(|kbps| (MIN_STREAM_BITRATE_KBPS..=MAX_STREAM_BITRATE_KBPS).contains(kbps))

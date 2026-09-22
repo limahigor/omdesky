@@ -1,8 +1,10 @@
+use crate::state::{StateError, atomic_write_bytes, read_limited_to_string};
 use omdesky_core::{CodecPreference, DisplayMode, InputMode};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, path::PathBuf};
 
 pub const DEFAULT_AGENT_PORT: u16 = 48155;
+pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,10 +23,12 @@ impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let path = config_path()?;
 
-        let mut config = if path.exists() {
-            toml::from_str(&fs::read_to_string(path)?)?
-        } else {
-            Self::default()
+        let mut config = match read_limited_to_string(&path, MAX_CONFIG_BYTES) {
+            Ok(contents) => toml::from_str(&contents)?,
+            Err(StateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Self::default()
+            }
+            Err(error) => return Err(ConfigError::State(error)),
         };
 
         if let Ok(port) = env::var("OMDESKY_AGENT_PORT") {
@@ -41,13 +45,8 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &std::path::Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(path, toml::to_string_pretty(self)?)?;
-
-        Ok(())
+        atomic_write_bytes(path, toml::to_string_pretty(self)?.as_bytes(), false)
+            .map_err(ConfigError::State)
     }
 }
 
@@ -213,6 +212,8 @@ pub enum ConfigError {
     #[error("invalid environment variable {0}")]
     InvalidEnvironment(&'static str),
     #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
@@ -244,18 +245,44 @@ mod tests {
 
     #[test]
     fn test_save_to_persists_stream_settings() {
-        let path = env::temp_dir().join(format!("omdesky-config-{}.toml", std::process::id()));
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("nested/config.toml");
 
         let mut config = Config::default();
         config.stream.bitrate_mbps = 25;
         config.stream.fps = 120;
 
         config.save_to(&path).expect("config saves");
-        let saved: Config = toml::from_str(&fs::read_to_string(&path).expect("config readable"))
-            .expect("saved config parses");
-        fs::remove_file(path).expect("temporary config removed");
+        let saved: Config = toml::from_str(
+            &read_limited_to_string(&path, MAX_CONFIG_BYTES).expect("config readable"),
+        )
+        .expect("saved config parses");
 
         assert_eq!(saved.stream.bitrate_mbps, 25);
         assert_eq!(saved.stream.fps, 120);
+    }
+
+    #[test]
+    fn test_save_to_replaces_an_existing_file_without_following_a_symlink() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("outside.toml");
+        let path = directory.path().join("config.toml");
+        std::fs::write(&target, "poisoned").expect("target written");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &path).expect("symlink created");
+
+        Config::default().save_to(&path).expect("config saves");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target readable"),
+            "poisoned"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_symlink()
+        );
     }
 }

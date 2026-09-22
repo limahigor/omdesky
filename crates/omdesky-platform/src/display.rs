@@ -178,19 +178,44 @@ pub fn spawn_focus_signals(sender: mpsc::Sender<()>) -> JoinHandle<()> {
 fn event_socket_path() -> Option<PathBuf> {
     let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
 
-    let candidates = [
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .map(|base| base.join(format!("hypr/{signature}/.socket2.sock"))),
-        Some(PathBuf::from(format!(
-            "/tmp/hypr/{signature}/.socket2.sock"
-        ))),
-    ];
+    if !is_safe_instance_signature(&signature) {
+        tracing::debug!("follow_focus.hyprland_signature_rejected");
+        return None;
+    }
 
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.exists())
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    let candidate = runtime_dir.join(format!("hypr/{signature}/.socket2.sock"));
+
+    is_own_unix_socket(&candidate).then_some(candidate)
+}
+
+fn is_safe_instance_signature(signature: &str) -> bool {
+    !signature.is_empty()
+        && signature.len() <= 128
+        && !signature.contains("..")
+        && signature.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+#[cfg(unix)]
+fn is_own_unix_socket(path: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+
+    let Ok(own_uid) = std::fs::metadata("/proc/self").map(|process| process.uid()) else {
+        return false;
+    };
+
+    metadata.file_type().is_socket() && metadata.uid() == own_uid
+}
+
+#[cfg(not(unix))]
+fn is_own_unix_socket(_path: &Path) -> bool {
+    false
 }
 
 async fn forward_socket_events(path: &Path, sender: &mpsc::Sender<()>) -> std::io::Result<()> {
@@ -295,6 +320,30 @@ mod tests {
                 .code,
             "DISPLAY_NOT_FOUND"
         );
+    }
+
+    #[test]
+    fn test_instance_signature_rejects_path_and_control_characters() {
+        assert!(is_safe_instance_signature("v0.41.2_1718000000"));
+        assert!(is_safe_instance_signature(
+            "efb50993780079460b0cbed1363e2166a2de1d9f_1790005601_1468723531"
+        ));
+        assert!(!is_safe_instance_signature("../../tmp/hypr"));
+        assert!(!is_safe_instance_signature("sig/with/slash"));
+        assert!(!is_safe_instance_signature("sig..sneaky"));
+        assert!(!is_safe_instance_signature("sig\u{1b}[2J"));
+        assert!(!is_safe_instance_signature(""));
+        assert!(!is_safe_instance_signature(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn test_event_socket_rejects_a_regular_file_in_place_of_the_socket() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("not-a-socket");
+        std::fs::write(&path, b"").expect("file written");
+
+        assert!(!is_own_unix_socket(&path));
+        assert!(!is_own_unix_socket(&directory.path().join("absent")));
     }
 
     #[test]

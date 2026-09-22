@@ -64,9 +64,6 @@ pub struct FocusResponse {
     pub focused: bool,
 }
 
-/// A command plus the envelope the agent needs to decide whether to apply it:
-/// which session the caller believes it owns, a single-use request identifier,
-/// and when the caller issued the request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub command: RemoteCommand,
@@ -143,9 +140,6 @@ pub struct SunshinePairChallengeResponse {
     pub expires_in_seconds: u64,
 }
 
-/// `pairing_id` is the single-use challenge the agent issued to this caller.
-/// `Debug` is implemented by hand so the PIN never reaches a log or a panic
-/// message.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SunshinePairRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

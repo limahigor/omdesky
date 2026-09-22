@@ -144,6 +144,30 @@ pub struct StreamHostDescriptor {
     pub application: String,
 }
 
+pub const MAX_STREAM_APPLICATION_BYTES: usize = 64;
+
+impl StreamHostDescriptor {
+    pub fn validate(&self) -> PortResult<()> {
+        let name = self.application.as_str();
+        let accepted = !name.is_empty()
+            && name.len() <= MAX_STREAM_APPLICATION_BYTES
+            && !name.starts_with('-')
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, ' ' | '.' | '_' | '-')
+            });
+
+        if accepted {
+            Ok(())
+        } else {
+            Err(PortError::new(
+                "INVALID_STREAM_APPLICATION",
+                "the remote node advertised an unusable streaming application name",
+                false,
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingState {
     Paired,
@@ -189,8 +213,6 @@ pub struct AllowedController {
 }
 
 impl AllowedController {
-    /// Entries written before capabilities existed were granted every control
-    /// action, so they keep that grant instead of silently losing access.
     fn legacy_capabilities() -> Vec<ControlCapability> {
         ControlCapability::ALL.to_vec()
     }
@@ -234,7 +256,7 @@ pub struct CommandSpec {
     pub timeout: Duration,
     pub stdout_limit: usize,
     pub stderr_limit: usize,
-    pub clear_environment: bool,
+    pub environment_policy: EnvironmentPolicy,
     pub stdin: StdinPolicy,
     pub capture: CapturePolicy,
     pub redacted_arg_indexes: Vec<usize>,
@@ -250,12 +272,26 @@ impl CommandSpec {
             timeout: Duration::from_secs(10),
             stdout_limit: 1024 * 1024,
             stderr_limit: 64 * 1024,
-            clear_environment: false,
+            environment_policy: EnvironmentPolicy::Session,
             stdin: StdinPolicy::Null,
             capture: CapturePolicy::Both,
             redacted_arg_indexes: Vec::new(),
         }
     }
+
+    pub fn with_environment_policy(mut self, policy: EnvironmentPolicy) -> Self {
+        self.environment_policy = policy;
+
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EnvironmentPolicy {
+    #[default]
+    Session,
+    Inherited,
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

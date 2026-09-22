@@ -133,7 +133,53 @@ async fn main() -> Result<()> {
 
 fn is_tailscale_address(address: std::net::IpAddr) -> bool {
     match address {
-        std::net::IpAddr::V4(address) => address.octets()[0] == 100,
-        std::net::IpAddr::V6(address) => address.segments()[0] == 0xfd7a,
+        std::net::IpAddr::V4(address) => {
+            let octets = address.octets();
+
+            octets[0] == 100 && (64..128).contains(&octets[1])
+        }
+        std::net::IpAddr::V6(address) => {
+            let segments = address.segments();
+
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    #[test]
+    fn test_only_the_cgnat_range_counts_as_tailscale() {
+        assert!(is_tailscale_address(
+            "100.64.0.1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(is_tailscale_address(
+            "100.127.255.254".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.0.0.1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.63.255.255".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.128.0.1".parse::<IpAddr>().expect("address")
+        ));
+    }
+
+    #[test]
+    fn test_only_the_tailscale_ula_prefix_counts_as_tailscale() {
+        assert!(is_tailscale_address(
+            "fd7a:115c:a1e0::1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "fd7a:0000:0000::1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "fd7a:115c:a1e1::1".parse::<IpAddr>().expect("address")
+        ));
     }
 }

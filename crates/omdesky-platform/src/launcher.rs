@@ -1,3 +1,4 @@
+use crate::state::{MAX_STATE_BYTES, atomic_write_bytes, create_private_dir_all};
 use async_trait::async_trait;
 use omdesky_application::ports::{LauncherSpec, LauncherStore, PortError, PortResult};
 use omdesky_core::NodeId;
@@ -30,12 +31,14 @@ impl DesktopLauncherStore {
 #[async_trait]
 impl LauncherStore for DesktopLauncherStore {
     async fn create(&self, launcher: LauncherSpec) -> PortResult<PathBuf> {
-        fs::create_dir_all(&self.directory).map_err(io_error)?;
+        create_private_dir_all(&self.directory).map_err(state_error)?;
         let path = self.path(launcher.node_id);
         let content = Self::render(&launcher);
 
-        if fs::read_to_string(&path).ok().as_deref() != Some(&content) {
-            fs::write(&path, content).map_err(io_error)?;
+        let current = crate::state::read_limited_to_string(&path, MAX_STATE_BYTES).ok();
+
+        if current.as_deref() != Some(content.as_str()) {
+            atomic_write_bytes(&path, content.as_bytes(), false).map_err(state_error)?;
         }
 
         Ok(path)
@@ -62,12 +65,11 @@ impl LauncherStore for DesktopLauncherStore {
     }
 
     async fn remove(&self, node_id: NodeId) -> PortResult<()> {
-        let path = self.path(node_id);
-        if path.exists() {
-            fs::remove_file(path).map_err(io_error)?;
+        match fs::remove_file(self.path(node_id)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(error)),
         }
-
-        Ok(())
     }
 }
 
@@ -76,6 +78,10 @@ fn escape_value(value: &str) -> String {
 }
 
 fn io_error(error: std::io::Error) -> PortError {
+    PortError::new("LAUNCHER_IO_FAILED", error.to_string(), false)
+}
+
+fn state_error(error: crate::state::StateError) -> PortError {
     PortError::new("LAUNCHER_IO_FAILED", error.to_string(), false)
 }
 

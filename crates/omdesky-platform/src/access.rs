@@ -21,16 +21,34 @@ impl FileAccessStore {
         }
     }
 
-    fn read_all(&self) -> PortResult<Vec<AllowedController>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
+    fn read_blocking(path: &std::path::Path) -> PortResult<Vec<AllowedController>> {
+        match read_json(path) {
+            Ok(controllers) => Ok(controllers),
+            Err(crate::state::StateError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(state_error(error)),
         }
-
-        read_json(&self.path).map_err(state_error)
     }
 
-    fn write_all(&self, controllers: &[AllowedController]) -> PortResult<()> {
-        atomic_write_json(&self.path, controllers, false).map_err(state_error)
+    async fn read_all(&self) -> PortResult<Vec<AllowedController>> {
+        let path = self.path.clone();
+
+        tokio::task::spawn_blocking(move || Self::read_blocking(&path))
+            .await
+            .map_err(|_| state_error("the allowlist could not be read"))?
+    }
+
+    async fn write_all(&self, controllers: Vec<AllowedController>) -> PortResult<()> {
+        let path = self.path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            atomic_write_json(&path, &controllers, true).map_err(state_error)
+        })
+        .await
+        .map_err(|_| state_error("the allowlist could not be written"))?
     }
 }
 
@@ -38,30 +56,35 @@ impl FileAccessStore {
 impl AccessStore for FileAccessStore {
     async fn list(&self) -> PortResult<Vec<AllowedController>> {
         let _guard = self.lock.lock().await;
-        self.read_all()
+
+        self.read_all().await
     }
 
     async fn allow(&self, controller: AllowedController) -> PortResult<()> {
         let _guard = self.lock.lock().await;
-        let mut controllers = self.read_all()?;
+
+        let mut controllers = self.read_all().await?;
         controllers.retain(|candidate| candidate.tailnet_node_id != controller.tailnet_node_id);
         controllers.push(controller);
 
-        self.write_all(&controllers)
+        self.write_all(controllers).await
     }
 
     async fn revoke(&self, tailnet_node_id: &str) -> PortResult<()> {
         let _guard = self.lock.lock().await;
-        let mut controllers = self.read_all()?;
+
+        let mut controllers = self.read_all().await?;
         controllers.retain(|candidate| candidate.tailnet_node_id != tailnet_node_id);
 
-        self.write_all(&controllers)
+        self.write_all(controllers).await
     }
 
     async fn is_allowed(&self, tailnet_node_id: &str) -> PortResult<bool> {
         let _guard = self.lock.lock().await;
+
         Ok(self
-            .read_all()?
+            .read_all()
+            .await?
             .iter()
             .any(|candidate| candidate.tailnet_node_id == tailnet_node_id))
     }

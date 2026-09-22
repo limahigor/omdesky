@@ -9,12 +9,16 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
+use crate::state::read_limited;
+
 use crate::hyprland::HyprlandAdapter;
 use omdesky_application::ports::RemoteOmarchy;
 
 pub const DEFAULT_API_BASE: &str = "https://127.0.0.1:47990";
 pub const DESKTOP_APPLICATION: &str = "Desktop";
 const KEYRING_SERVICE: &str = "io.github.limahigor.omdesky.sunshine";
+const MAX_SUNSHINE_CONFIG_BYTES: usize = 256 * 1024;
+const MAX_LEGACY_CREDENTIAL_BYTES: usize = 16 * 1024;
 const KEYRING_ACCOUNT: &str = "admin-api";
 
 #[derive(Clone)]
@@ -98,10 +102,19 @@ impl SunshineCredentialStore {
             return parse_credentials(&secret).map(Some);
         }
 
-        let Some(path) = self.legacy_path.as_deref().filter(|path| path.exists()) else {
+        let Some(path) = self.legacy_path.as_deref() else {
             return Ok(None);
         };
-        let secret = fs::read(path).map_err(|_| SunshineCredentialError::MigrationFailed)?;
+
+        let secret = match read_limited(path, MAX_LEGACY_CREDENTIAL_BYTES) {
+            Ok(secret) => secret,
+            Err(crate::state::StateError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(SunshineCredentialError::MigrationFailed),
+        };
         let credentials = parse_credentials(&secret)?;
 
         self.store(&credentials.username, credentials.password.expose_secret())?;
@@ -179,8 +192,14 @@ impl SunshineAdapter {
         api_base: String,
         credentials: SunshineCredentialStore,
     ) -> Self {
+        let loopback_only = is_loopback_api(&api_base);
+
+        if !loopback_only {
+            tracing::warn!("sunshine.api_not_loopback_certificate_validation_enforced");
+        }
+
         let http = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(loopback_only)
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_default();
@@ -232,7 +251,10 @@ impl StreamHost for SunshineAdapter {
         let installed = self.installed().await;
         let running = self.running().await;
 
-        let config = fs::read_to_string(&self.config_path).unwrap_or_default();
+        let config = read_limited(&self.config_path, MAX_SUNSHINE_CONFIG_BYTES)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
         let keyboard_disabled = config_value(&config, "keyboard") == Some("disabled");
         let mouse_disabled = config_value(&config, "mouse") == Some("disabled");
 
@@ -325,6 +347,29 @@ impl StreamHost for SunshineAdapter {
     }
 }
 
+fn is_loopback_api(api_base: &str) -> bool {
+    let Some(rest) = api_base
+        .strip_prefix("https://")
+        .or_else(|| api_base.strip_prefix("http://"))
+    else {
+        return false;
+    };
+
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit_once(':')
+        .map_or(rest.split('/').next().unwrap_or_default(), |(host, _)| host);
+
+    match host.trim_start_matches('[').trim_end_matches(']') {
+        "localhost" => true,
+        candidate => candidate
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+    }
+}
+
 fn credential_port_error() -> PortError {
     PortError::new(
         "SUNSHINE_API_UNAVAILABLE",
@@ -381,6 +426,16 @@ mod tests {
 
         assert_eq!(config_value(config, "keyboard"), Some("enabled"));
         assert_eq!(config_value(config, "key"), None);
+    }
+
+    #[test]
+    fn test_only_loopback_endpoints_may_skip_certificate_validation() {
+        assert!(is_loopback_api(DEFAULT_API_BASE));
+        assert!(is_loopback_api("https://[::1]:47990"));
+        assert!(is_loopback_api("https://localhost:47990"));
+        assert!(!is_loopback_api("https://100.64.0.7:47990"));
+        assert!(!is_loopback_api("https://sunshine.example:47990"));
+        assert!(!is_loopback_api("127.0.0.1:47990"));
     }
 
     #[test]

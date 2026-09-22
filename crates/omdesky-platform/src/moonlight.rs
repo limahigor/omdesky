@@ -1,17 +1,21 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
-    CapturePolicy, ChildProcess, CommandRunner, CommandSpec, PairingState, PendingPairing,
-    PortError, PortResult, StreamClient, StreamHostDescriptor, StreamLaunchRequest,
+    CapturePolicy, ChildProcess, CommandRunner, CommandSpec, EnvironmentPolicy, PairingState,
+    PendingPairing, PortError, PortResult, StreamClient, StreamHostDescriptor, StreamLaunchRequest,
 };
 use omdesky_core::CodecPreference;
 use std::{process::Stdio, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::{Child, Command},
     time::timeout,
 };
 
+use crate::process::{TRUSTED_PATH, resolve_program};
+
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(20);
+const PAIRING_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+const PAIRING_STDERR_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct MoonlightAdapter {
@@ -26,22 +30,28 @@ impl MoonlightAdapter {
     pub async fn version(&self) -> PortResult<String> {
         let output = self
             .runner
-            .run(CommandSpec::new("moonlight", ["--version".to_owned()]))
+            .run(moonlight_spec(["--version".to_owned()]))
             .await
             .map_err(|error| PortError::new("MOONLIGHT_NOT_INSTALLED", error.message, false))?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 }
 
+fn moonlight_spec(args: impl IntoIterator<Item = String>) -> CommandSpec {
+    CommandSpec::new("moonlight", args).with_environment_policy(EnvironmentPolicy::Inherited)
+}
+
 #[async_trait]
 impl StreamClient for MoonlightAdapter {
     async fn pairing_state(&self, host: &StreamHostDescriptor) -> PortResult<PairingState> {
+        host.validate()?;
+
         let output = self
             .runner
-            .run(CommandSpec::new(
-                "moonlight",
-                ["list".to_owned(), host.address.to_string()],
-            ))
+            .run(moonlight_spec([
+                "list".to_owned(),
+                host.address.to_string(),
+            ]))
             .await;
 
         match output {
@@ -61,13 +71,18 @@ impl StreamClient for MoonlightAdapter {
     }
 
     async fn begin_pairing(&self, host: &StreamHostDescriptor) -> PortResult<PendingPairing> {
-        let mut child = Command::new("moonlight")
+        host.validate()?;
+
+        let program = resolve_program("moonlight")?;
+
+        let mut child = Command::new(program)
             .arg("pair")
             .arg(host.address.to_string())
+            .env("PATH", TRUSTED_PATH)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .kill_on_drop(false)
+            .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
                 PortError::new(
@@ -77,32 +92,56 @@ impl StreamClient for MoonlightAdapter {
                 )
             })?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            PortError::new(
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let drain = tokio::spawn(async move { drain(stderr).await });
+
+        let Some(stdout) = stdout else {
+            drain.abort();
+            reap(child).await;
+
+            return Err(PortError::new(
                 "MOONLIGHT_PAIRING_FAILED",
                 "Moonlight did not expose its pairing output",
                 false,
-            )
-        })?;
+            ));
+        };
 
-        let pin = timeout(PAIRING_TIMEOUT, read_pin(stdout))
-            .await
-            .map_err(|_| {
-                PortError::new(
+        let pin = timeout(PAIRING_TIMEOUT, read_pin(stdout)).await;
+
+        drain.abort();
+
+        match pin {
+            Ok(Ok(pin)) => {
+                tokio::spawn(async move { reap(child).await });
+
+                Ok(PendingPairing { pin })
+            }
+            Ok(Err(error)) => {
+                reap(child).await;
+
+                Err(error)
+            }
+            Err(_) => {
+                reap(child).await;
+
+                Err(PortError::new(
                     "MOONLIGHT_PAIRING_FAILED",
                     "timed out waiting for Moonlight to produce a pairing PIN",
                     true,
-                )
-            })??;
-
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-
-        Ok(PendingPairing { pin })
+                ))
+            }
+        }
     }
 
     async fn launch(&self, request: StreamLaunchRequest) -> PortResult<Box<dyn ChildProcess>> {
+        request.host.validate()?;
+        request
+            .profile
+            .validate()
+            .map_err(|error| PortError::new("INVALID_STREAM_PROFILE", error.to_string(), false))?;
+
         self.runner
             .spawn(launch_spec(&request))
             .await
@@ -110,8 +149,36 @@ impl StreamClient for MoonlightAdapter {
     }
 }
 
+async fn drain(stream: Option<tokio::process::ChildStderr>) {
+    let Some(mut stream) = stream else {
+        return;
+    };
+    let mut sink = [0_u8; 4096];
+    let mut total = 0_usize;
+
+    while let Ok(count) = stream.read(&mut sink).await {
+        if count == 0 {
+            return;
+        }
+
+        total = total.saturating_add(count);
+
+        if total > PAIRING_STDERR_LIMIT {
+            return;
+        }
+    }
+}
+
+async fn reap(mut child: Child) {
+    let _ = child.start_kill();
+
+    if timeout(PAIRING_REAP_TIMEOUT, child.wait()).await.is_err() {
+        tracing::debug!("moonlight.pairing.reap_timed_out");
+    }
+}
+
 fn launch_spec(request: &StreamLaunchRequest) -> CommandSpec {
-    let mut spec = CommandSpec::new("moonlight", launch_arguments(request));
+    let mut spec = moonlight_spec(launch_arguments(request));
     spec.timeout = Duration::from_secs(30);
     spec.capture = CapturePolicy::Discard;
 
