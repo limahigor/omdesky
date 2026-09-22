@@ -85,6 +85,8 @@ OMDESKY_AGENT_PORT=49000 omdesky devices
 
 The agent listens only on the local Tailscale address. `allow_unsafe_wildcard_bind` disables the address-range safety check, but it does not make the agent listen on every network interface.
 
+`strict_tailnet_only` is enforced: with its default of `true`, a request from an address outside `100.64.0.0/10` and `fd7a:115c:a1e0::/48` is refused before the agent resolves an identity or runs any subprocess.
+
 ## Access control
 
 Tailscale is the first access boundary. Your Tailscale policy must allow the controller to reach the remote computer's agent port.
@@ -144,7 +146,7 @@ Existing `sunshine-credentials.json` files are migrated into Secret Service and 
 
 ## Settings reserved for later use
 
-The current release stores but does not apply `general.notifications`, `general.default_input`, `input.escape_chord`, and `network.strict_tailnet_only`. Keep their default values unless you are testing upcoming behavior.
+The current release stores but does not apply `general.notifications`, `general.default_input`, and `input.escape_chord`. Keep their default values unless you are testing upcoming behavior.
 
 ## Rejected and rate-limited requests
 

@@ -275,9 +275,10 @@ async fn run_command(
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<CommandResponse>, ApiError> {
     let command = request.command;
-    command.validate().map_err(domain_error)?;
 
     let peer = authorize(&state, source, command.required_capability()).await?;
+
+    command.validate().map_err(domain_error)?;
 
     state
         .replay
@@ -292,12 +293,11 @@ async fn run_command(
         return Ok(Json(response));
     }
 
-    match state.sessions.snapshot().await.map(|session| session.role) {
+    let session = state.sessions.snapshot().await;
+
+    match session.as_ref().map(|session| session.role) {
         Some(SessionRole::Remote) => {
-            let controller = state
-                .sessions
-                .snapshot()
-                .await
+            let controller = session
                 .and_then(|session| session.controller)
                 .ok_or_else(|| {
                     ApiError::new(
@@ -674,7 +674,7 @@ fn authorization_error(error: AuthorizationError) -> ApiError {
             "The allowed devices list could not be read.",
             false,
         ),
-        AuthorizationError::Unauthorized => unauthorized(),
+        AuthorizationError::OutsideTailnet | AuthorizationError::Unauthorized => unauthorized(),
     }
 }
 

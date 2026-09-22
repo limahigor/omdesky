@@ -1,5 +1,5 @@
 use omdesky_application::ports::{AccessStore, AllowedController, MeshNetwork};
-use omdesky_core::ControlCapability;
+use omdesky_core::{ControlCapability, is_tailscale_address};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -37,6 +37,7 @@ pub enum AuthorizationError {
     Unauthorized,
     Forbidden,
     AccessStoreFailed,
+    OutsideTailnet,
 }
 
 struct CachedIdentity {
@@ -56,10 +57,19 @@ pub struct Authorizer {
     allowlist: Mutex<Option<CachedAllowlist>>,
     lookups: Semaphore,
     limiter: Mutex<RateLimiter>,
+    strict_tailnet_only: bool,
 }
 
 impl Authorizer {
     pub fn new(mesh: Arc<dyn MeshNetwork>, access: Arc<dyn AccessStore>) -> Self {
+        Self::with_strict_tailnet_only(mesh, access, true)
+    }
+
+    pub fn with_strict_tailnet_only(
+        mesh: Arc<dyn MeshNetwork>,
+        access: Arc<dyn AccessStore>,
+        strict_tailnet_only: bool,
+    ) -> Self {
         Self {
             mesh,
             access,
@@ -71,6 +81,7 @@ impl Authorizer {
                 RATE_LIMIT_PER_SECOND,
                 RATE_LIMIT_TRACKED_SOURCES,
             )),
+            strict_tailnet_only,
         }
     }
 
@@ -79,6 +90,12 @@ impl Authorizer {
         source: IpAddr,
         required: ControlCapability,
     ) -> Result<AuthorizedPeer, AuthorizationError> {
+        if self.strict_tailnet_only && !is_tailscale_address(source) {
+            tracing::warn!("authorize.source_outside_tailnet");
+
+            return Err(AuthorizationError::OutsideTailnet);
+        }
+
         if !self.limiter.lock().await.admit(source, Instant::now()) {
             tracing::warn!("authorize.rate_limited");
 
@@ -344,6 +361,50 @@ mod tests {
             OffsetDateTime::UNIX_EPOCH,
             capabilities.iter().copied(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_a_source_outside_the_tailnet_is_denied_before_any_lookup() {
+        let (authorizer, mesh) = authorizer(
+            Some("node-a"),
+            vec![entry("node-a", &ControlCapability::ALL)],
+        );
+
+        let error = authorizer
+            .authorize(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                ControlCapability::ReadMetadata,
+            )
+            .await
+            .expect_err("a non-tailnet source is denied");
+
+        assert_eq!(error, AuthorizationError::OutsideTailnet);
+        assert_eq!(mesh.lookups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_relaxing_the_tailnet_check_allows_other_sources() {
+        let mesh = Arc::new(CountingMesh {
+            lookups: AtomicUsize::new(0),
+            identity: Some("node-a"),
+        });
+        let authorizer = Authorizer::with_strict_tailnet_only(
+            mesh,
+            Arc::new(StaticAccess {
+                entries: vec![entry("node-a", &ControlCapability::ALL)],
+            }),
+            false,
+        );
+
+        assert!(
+            authorizer
+                .authorize(
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                    ControlCapability::ReadMetadata,
+                )
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
