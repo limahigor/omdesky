@@ -35,7 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** existing installations must run `omdesky access allow` on both computers before connecting again. Until an allowlist entry exists, the agent refuses control requests.
+- **Breaking:** both computers must run this version. A controller from 0.1.1 sends no request identifier, so a newer agent refuses every command it issues; a newer controller cannot obtain a session lease or a pairing challenge from a 0.1.1 agent. Upgrade both ends together.
+- **Breaking:** an installation that never populated its allowlist now refuses control requests until `omdesky access allow` names the other computer. Allowlist entries written by earlier versions keep working and are read as holding every capability.
+- **Breaking:** the allowlist is consulted in both directions. An installation that listed the controller only on the computer being controlled will stream, but remote shortcuts and follow-focus stop working until the controller also lists that computer.
 
 ## [0.1.1] - 2026-09-13
 
