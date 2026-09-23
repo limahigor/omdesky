@@ -189,7 +189,7 @@ pub fn resolve_program(program: &str) -> PortResult<PathBuf> {
     Ok(resolved)
 }
 
-fn build_command(spec: &CommandSpec) -> PortResult<Command> {
+pub(crate) fn build_command(spec: &CommandSpec) -> PortResult<Command> {
     let program = resolve_program(&spec.program)?;
 
     let mut command = Command::new(program);

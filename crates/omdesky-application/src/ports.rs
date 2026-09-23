@@ -205,9 +205,10 @@ pub enum PairingState {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingPairing {
-    pub pin: String,
+#[async_trait]
+pub trait PendingPairing: Send {
+    fn pin(&self) -> &str;
+    async fn complete(self: Box<Self>) -> PortResult<()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -434,7 +435,10 @@ pub trait StreamWindowLocator: Send + Sync {
 #[async_trait]
 pub trait StreamClient: Send + Sync {
     async fn pairing_state(&self, host: &StreamHostDescriptor) -> PortResult<PairingState>;
-    async fn begin_pairing(&self, host: &StreamHostDescriptor) -> PortResult<PendingPairing>;
+    async fn begin_pairing(
+        &self,
+        host: &StreamHostDescriptor,
+    ) -> PortResult<Box<dyn PendingPairing>>;
     async fn launch(&self, request: StreamLaunchRequest) -> PortResult<Box<dyn ChildProcess>>;
 }
 

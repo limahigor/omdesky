@@ -71,11 +71,13 @@ impl PairStream {
                 endpoint,
                 SunshinePairRequest {
                     pairing_id: challenge.pairing_id,
-                    pin: pending.pin,
+                    pin: pending.pin().to_owned(),
                     client_name: self.client_name.clone(),
                 },
             )
             .await?;
+
+        pending.complete().await?;
 
         match self.stream.pairing_state(&host).await? {
             PairingState::Paired => Ok(()),
