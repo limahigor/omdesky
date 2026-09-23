@@ -1,55 +1,70 @@
+#![forbid(unsafe_code)]
+
+pub mod authorize;
+pub mod error;
+pub mod pairing;
+pub mod replay;
+pub mod session;
+
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, Query, State},
-    http::StatusCode,
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
+    http::{HeaderName, HeaderValue},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use omdesky_application::display::FollowFocusRouter;
 use omdesky_application::ports::{
-    AccessStore, AgentClient, AgentEndpoint, CommandExecutor, MeshNetwork, Notification,
-    NotificationService, RemoteOmarchy, SessionKeybindConfig, SessionKeybindInstaller, StreamHost,
+    AgentClient, AgentEndpoint, CommandExecutor, Notification, NotificationService, RemoteOmarchy,
+    StreamHost,
 };
-use omdesky_core::{DomainError, RemoteCommand, SessionRole, Window, WorkspaceId, WorkspaceTarget};
+use omdesky_application::services::MOONLIGHT_WINDOW_CLASS;
+use omdesky_core::{
+    ControlCapability, RemoteCommand, SessionClaim, SessionEndpoint, SessionRole, Window,
+    WindowSelector, WorkspaceId, WorkspaceTarget,
+};
 use omdesky_platform::display::{
     HyprlandDisplayTopology, MoonlightDisplayController, spawn_focus_signals,
 };
 use omdesky_protocol::{
-    ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
-    FocusResponse, FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, PROTOCOL_V1,
-    ProtocolError, SunshinePairRequest, SunshinePairResponse, SunshineStatusResponse,
-    WindowsResponse, WorkspacesResponse,
+    ActiveWindowResponse, CapabilitiesResponse, CommandRequest, CommandResponse, DisplaysResponse,
+    ErrorCode, FocusResponse, FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, PROTOCOL,
+    RELEASE, RELEASE_HEADER, SunshinePairChallengeResponse, SunshinePairRequest,
+    SunshinePairResponse, SunshineStatusResponse, WindowsResponse, WorkspacesResponse,
+    is_compatible_release,
 };
 use serde::Deserialize;
-use serde_json::Map;
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
-const FOLLOW_FOCUS_DEBOUNCE: Duration = Duration::from_millis(50);
+use crate::{
+    authorize::{AuthorizedPeer, Authorizer},
+    error::{ApiError, ApiJson},
+    pairing::PairingChallenges,
+    replay::ReplayGuard,
+    session::{SessionCoordinator, SessionOutcome},
+};
 
-#[derive(Clone)]
-pub struct SessionConfig {
-    pub role: SessionRole,
-    pub controller: Option<AgentEndpoint>,
-}
+const FOLLOW_FOCUS_DEBOUNCE: Duration = Duration::from_millis(50);
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct AgentState {
     pub node: NodeInfoResponse,
     pub desktop: Arc<dyn RemoteOmarchy>,
     pub sunshine: Arc<dyn StreamHost>,
-    pub mesh: Arc<dyn MeshNetwork>,
-    pub access: Arc<dyn AccessStore>,
     pub commands: Arc<dyn CommandExecutor>,
-    pub keybinds: Arc<dyn SessionKeybindInstaller>,
     pub agent_client: Arc<dyn AgentClient>,
     pub notifications: Arc<dyn NotificationService>,
-    pub session: Arc<RwLock<Option<SessionConfig>>>,
-    pub follow_focus: Arc<Mutex<Option<FollowFocusSession>>>,
+    pub authorizer: Arc<Authorizer>,
+    pub sessions: Arc<SessionCoordinator>,
+    pub challenges: Arc<PairingChallenges>,
+    pub replay: Arc<ReplayGuard>,
     pub agent_port: u16,
 }
 
@@ -65,45 +80,71 @@ impl FollowFocusSession {
     }
 }
 
-fn start_follow_focus(state: &AgentState, controller: AgentEndpoint) {
-    let display_controller = Arc::new(MoonlightDisplayController::new(
-        state.agent_client.clone(),
-        controller,
-        state.desktop.clone(),
-    ));
-    let topology = Arc::new(HyprlandDisplayTopology::new(state.desktop.clone()));
-
-    let (sender, receiver) = mpsc::channel(32);
-    let source = spawn_focus_signals(sender);
-    let router = FollowFocusRouter::new(
-        display_controller,
-        topology,
-        state.notifications.clone(),
-        FOLLOW_FOCUS_DEBOUNCE,
-    );
-    let router = tokio::spawn(router.run(receiver));
-
-    let session = FollowFocusSession { source, router };
-
-    if let Ok(mut guard) = state.follow_focus.lock()
-        && let Some(previous) = guard.replace(session)
-    {
-        previous.stop();
-    }
+#[derive(Clone)]
+pub struct FollowFocusSupervisor {
+    agent_client: Arc<dyn AgentClient>,
+    desktop: Arc<dyn RemoteOmarchy>,
+    notifications: Arc<dyn NotificationService>,
+    running: Arc<Mutex<Option<FollowFocusSession>>>,
 }
 
-fn stop_follow_focus(state: &AgentState) {
-    if let Ok(mut guard) = state.follow_focus.lock()
-        && let Some(session) = guard.take()
-    {
-        session.stop();
+impl FollowFocusSupervisor {
+    pub fn new(
+        agent_client: Arc<dyn AgentClient>,
+        desktop: Arc<dyn RemoteOmarchy>,
+        notifications: Arc<dyn NotificationService>,
+    ) -> Self {
+        Self {
+            agent_client,
+            desktop,
+            notifications,
+            running: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn set_controller(&self, controller: Option<AgentEndpoint>) {
+        let replacement = controller.map(|controller| {
+            let display_controller = Arc::new(MoonlightDisplayController::new(
+                self.agent_client.clone(),
+                controller,
+                self.desktop.clone(),
+            ));
+            let topology = Arc::new(HyprlandDisplayTopology::new(self.desktop.clone()));
+
+            let (sender, receiver) = mpsc::channel(32);
+            let source = spawn_focus_signals(sender);
+            let router = FollowFocusRouter::new(
+                display_controller,
+                topology,
+                self.notifications.clone(),
+                FOLLOW_FOCUS_DEBOUNCE,
+            );
+
+            FollowFocusSession {
+                source,
+                router: tokio::spawn(router.run(receiver)),
+            }
+        });
+
+        let Ok(mut running) = self.running.lock() else {
+            return;
+        };
+
+        let previous = match replacement {
+            Some(session) => running.replace(session),
+            None => running.take(),
+        };
+
+        if let Some(previous) = previous {
+            previous.stop();
+        }
     }
 }
 
 pub fn router(state: AgentState) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
+    let controlled = Router::new()
         .route("/v1/node", get(node))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/displays", get(displays))
         .route("/v1/workspaces", get(workspaces))
         .route("/v1/workspaces/focus", post(focus_workspace))
@@ -112,15 +153,52 @@ pub fn router(state: AgentState) -> Router {
         .route("/v1/windows/{window_id}/focus", post(focus_window))
         .route("/v1/commands", post(run_command))
         .route("/v1/sunshine", get(sunshine_status))
+        .route("/v1/sunshine/pair/challenge", post(sunshine_pair_challenge))
         .route("/v1/sunshine/pair", post(sunshine_pair))
+        .route_layer(middleware::from_fn(require_compatible_release));
+
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(controlled)
+        .layer(middleware::map_response(advertise_release))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
+}
+
+async fn require_compatible_release(request: Request, next: Next) -> Response {
+    let compatible = request
+        .headers()
+        .get(RELEASE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_compatible_release);
+
+    if !compatible {
+        tracing::debug!(path = %request.uri().path(), "request.release_incompatible");
+
+        return ApiError::new(
+            ErrorCode::VersionIncompatible,
+            format!("this device runs Omdesky {RELEASE}; both computers must run the same release"),
+        )
+        .into_response();
+    }
+
+    next.run(request).await
+}
+
+async fn advertise_release(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static(RELEASE_HEADER),
+        HeaderValue::from_static(RELEASE),
+    );
+
+    response
 }
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_owned(),
-        protocol: PROTOCOL_V1,
-        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol: PROTOCOL,
+        agent_version: RELEASE.to_owned(),
     })
 }
 
@@ -128,15 +206,30 @@ async fn node(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<NodeInfoResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
     Ok(Json(state.node.clone()))
+}
+
+async fn capabilities(
+    State(state): State<AgentState>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+) -> Result<Json<CapabilitiesResponse>, ApiError> {
+    let peer = state
+        .authorizer
+        .authenticate(source.ip())
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(CapabilitiesResponse {
+        capabilities: peer.capabilities,
+    }))
 }
 
 async fn displays(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<DisplaysResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
     Ok(Json(DisplaysResponse {
         displays: state.desktop.displays().await?,
     }))
@@ -146,7 +239,7 @@ async fn workspaces(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<WorkspacesResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
     Ok(Json(WorkspacesResponse {
         workspaces: state.desktop.workspaces().await?,
     }))
@@ -163,7 +256,7 @@ async fn windows(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     Query(filter): Query<WindowFilter>,
 ) -> Result<Json<WindowsResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
 
     let windows = state
         .desktop
@@ -190,7 +283,7 @@ async fn active_window(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<ActiveWindowResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
     Ok(Json(ActiveWindowResponse {
         window: state.desktop.active_window().await?,
     }))
@@ -199,9 +292,9 @@ async fn active_window(
 async fn focus_workspace(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
-    Json(request): Json<FocusWorkspaceRequest>,
+    ApiJson(request): ApiJson<FocusWorkspaceRequest>,
 ) -> Result<Json<FocusResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::FocusWorkspace).await?;
     validate_workspace_target(&request.target)?;
     state.desktop.focus_workspace(request.target).await?;
     Ok(Json(FocusResponse { focused: true }))
@@ -212,7 +305,7 @@ async fn focus_window(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     Path(window_id): Path<String>,
 ) -> Result<Json<FocusResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::FocusWorkspace).await?;
     state.desktop.focus_window(&window_id).await?;
     Ok(Json(FocusResponse { focused: true }))
 }
@@ -220,43 +313,46 @@ async fn focus_window(
 async fn run_command(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
-    Json(request): Json<CommandRequest>,
+    ApiJson(request): ApiJson<CommandRequest>,
 ) -> Result<Json<CommandResponse>, ApiError> {
-    authorize(&state, source).await?;
-
     let command = request.command;
-    command.validate().map_err(domain_error)?;
+
+    let peer = authorize(&state, source, command.required_capability()).await?;
+
+    command.validate().map_err(ApiError::from)?;
+
+    state
+        .replay
+        .admit(request.request_id, request.issued_at)
+        .await
+        .map_err(ApiError::from)?;
 
     if command.is_session_control() {
-        apply_session_command(&state, command).await?;
-        return Ok(Json(CommandResponse { executed: true }));
+        let response =
+            apply_session_command(&state, &peer, source, command, request.session).await?;
+
+        return Ok(Json(response));
     }
 
-    match current_role(&state) {
-        Some(SessionRole::Remote) => {
-            if command.controller_exclusive() {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "COMMAND_NOT_ALLOWED_ON_REMOTE",
-                    "command is exclusive to the controller and is not relayed",
-                    false,
-                ));
-            }
+    let session = state.sessions.snapshot().await;
 
-            let controller = current_controller(&state).ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::CONFLICT,
-                    "NO_CONTROLLER",
-                    "remote session has no controller endpoint to relay to",
-                    false,
-                )
-            })?;
+    match session.as_ref().map(|session| session.role) {
+        Some(SessionRole::Remote) => {
+            let controller = session
+                .and_then(|session| session.controller)
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::NoController,
+                        "remote session has no controller endpoint to relay to",
+                    )
+                })?;
 
             state
                 .agent_client
-                .send_command(&controller, command)
+                .send_command(&controller, CommandRequest::new(command))
                 .await?;
-            Ok(Json(CommandResponse { executed: true }))
+
+            Ok(Json(CommandResponse::executed()))
         }
         _ => {
             if let RemoteCommand::SwitchStreamDisplay { display } = command {
@@ -268,7 +364,6 @@ async fn run_command(
 
                 tracing::info!(
                     display_id = %target,
-                    remote = %remote_endpoint.address,
                     port = remote_endpoint.port,
                     "controller.switch_display.received"
                 );
@@ -278,15 +373,8 @@ async fn run_command(
 
                 let displays = state.agent_client.displays(&remote_endpoint).await?;
 
-                tracing::debug!(
-                    displays = ?displays.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
-                    "controller.switch_display.remote_topology"
-                );
-
                 let shortcut =
                     omdesky_platform::display::resolve_display_switch_shortcut(&displays, &target)?;
-
-                tracing::info!(?shortcut, "controller.switch_display.dispatch");
 
                 let outcome = state.commands.execute(shortcut).await;
 
@@ -300,7 +388,7 @@ async fn run_command(
 
                 tracing::info!("controller.switch_display.dispatched");
 
-                return Ok(Json(CommandResponse { executed: true }));
+                return Ok(Json(CommandResponse::executed()));
             }
 
             let notification = controller_command_notification(&command);
@@ -311,7 +399,7 @@ async fn run_command(
                 let _ = state.notifications.send(notification).await;
             }
 
-            Ok(Json(CommandResponse { executed: true }))
+            Ok(Json(CommandResponse::executed()))
         }
     }
 }
@@ -339,7 +427,8 @@ fn controller_command_notification(command: &RemoteCommand) -> Option<Notificati
         RemoteCommand::CloseWindow { .. } => "The remote session was closed",
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => return None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => return None,
     };
 
     Some(Notification {
@@ -348,97 +437,211 @@ fn controller_command_notification(command: &RemoteCommand) -> Option<Notificati
     })
 }
 
-async fn apply_session_command(state: &AgentState, command: RemoteCommand) -> Result<(), ApiError> {
+async fn apply_session_command(
+    state: &AgentState,
+    peer: &AuthorizedPeer,
+    source: SocketAddr,
+    command: RemoteCommand,
+    claim: Option<SessionClaim>,
+) -> Result<CommandResponse, ApiError> {
     match command {
-        RemoteCommand::AttachSession { role, controller } => {
-            let controller = controller.map(|endpoint| AgentEndpoint {
-                address: endpoint.address,
-                port: endpoint.port,
-            });
+        RemoteCommand::AttachSession {
+            role,
+            controller,
+            window,
+        } => {
+            let controller = controller
+                .map(|endpoint| callback_endpoint(endpoint, source))
+                .transpose()?;
+            let window =
+                window.unwrap_or_else(|| WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()));
 
-            if let Ok(mut guard) = state.session.write() {
-                *guard = Some(SessionConfig {
-                    role,
-                    controller: controller.clone(),
-                });
+            if let Some(controller) = &controller {
+                verify_callback_access(state, controller).await?;
             }
 
-            if role == SessionRole::Remote
-                && let Some(endpoint) = controller.clone()
-            {
-                start_follow_focus(state, endpoint);
-            }
+            let grant = state
+                .sessions
+                .attach(&peer.tailnet_node_id, role, controller, window)
+                .await
+                .map_err(ApiError::from)?;
 
-            state
-                .keybinds
-                .install(SessionKeybindConfig { role, controller })
-                .await?;
+            tracing::info!(
+                generation = grant.generation,
+                role = ?role,
+                "session.attached"
+            );
 
-            Ok(())
+            Ok(CommandResponse::granted(grant))
         }
         RemoteCommand::DetachSession => {
-            if let Ok(mut guard) = state.session.write() {
-                *guard = None;
-            }
+            let claim = claim.ok_or_else(missing_session_claim)?;
 
-            stop_follow_focus(state);
-            state.keybinds.clear().await?;
+            let outcome = state
+                .sessions
+                .detach(&peer.tailnet_node_id, claim)
+                .await
+                .map_err(ApiError::from)?;
 
-            Ok(())
+            Ok(match outcome {
+                SessionOutcome::Applied => CommandResponse::executed(),
+                SessionOutcome::Ignored => CommandResponse::ignored(),
+            })
         }
-        _ => Ok(()),
+        RemoteCommand::RenewSession => {
+            let claim = claim.ok_or_else(missing_session_claim)?;
+
+            let grant = state
+                .sessions
+                .renew(&peer.tailnet_node_id, claim)
+                .await
+                .map_err(ApiError::from)?;
+
+            Ok(CommandResponse::granted(grant))
+        }
+        _ => Ok(CommandResponse::ignored()),
     }
 }
 
-fn current_role(state: &AgentState) -> Option<SessionRole> {
-    state
-        .session
-        .read()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|config| config.role))
+async fn verify_callback_access(
+    state: &AgentState,
+    controller: &AgentEndpoint,
+) -> Result<(), ApiError> {
+    let granted = match state.agent_client.granted_capabilities(controller).await {
+        Ok(granted) => granted,
+        Err(error) => return Err(callback_probe_error(error)),
+    };
+
+    let missing = ControlCapability::CALLBACK
+        .into_iter()
+        .filter(|capability| !granted.contains(capability))
+        .map(ControlCapability::as_str)
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    tracing::warn!(missing = %missing.join(","), "session.callback_access_missing");
+
+    Err(callback_access_missing())
 }
 
-fn current_controller(state: &AgentState) -> Option<AgentEndpoint> {
-    state
-        .session
-        .read()
-        .ok()
-        .and_then(|guard| guard.as_ref().and_then(|config| config.controller.clone()))
+fn callback_probe_error(error: omdesky_application::ports::PortError) -> ApiError {
+    tracing::warn!(code = error.code, "session.callback_probe_failed");
+
+    match error.code {
+        "UNAUTHORIZED" | "CAPABILITY_DENIED" => callback_access_missing(),
+        "VERSION_INCOMPATIBLE" => ApiError::new(
+            ErrorCode::VersionIncompatible,
+            "The controller runs a different Omdesky release.",
+        ),
+        _ => ApiError::new(
+            ErrorCode::ControllerUnreachable,
+            "This device could not reach the controller's agent.",
+        ),
+    }
+}
+
+fn callback_access_missing() -> ApiError {
+    ApiError::new(
+        ErrorCode::CallbackAccessMissing,
+        "The controller does not allow this device to send shortcuts back.",
+    )
+}
+
+fn callback_endpoint(
+    endpoint: SessionEndpoint,
+    source: SocketAddr,
+) -> Result<AgentEndpoint, ApiError> {
+    if endpoint.address != source.ip() {
+        tracing::warn!("session.callback_endpoint_rejected");
+
+        return Err(ApiError::new(
+            ErrorCode::InvalidCommand,
+            "The controller endpoint must be the address this request came from.",
+        ));
+    }
+
+    Ok(AgentEndpoint {
+        address: source.ip(),
+        port: endpoint.port,
+    })
+}
+
+fn missing_session_claim() -> ApiError {
+    ApiError::new(
+        ErrorCode::InvalidCommand,
+        "This action requires the session it belongs to.",
+    )
 }
 
 async fn sunshine_status(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<SunshineStatusResponse>, ApiError> {
-    authorize(&state, source).await?;
+    authorize(&state, source, ControlCapability::ReadMetadata).await?;
     Ok(Json(state.sunshine.status().await?))
+}
+
+async fn sunshine_pair_challenge(
+    State(state): State<AgentState>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+) -> Result<Json<SunshinePairChallengeResponse>, ApiError> {
+    let peer = authorize(&state, source, ControlCapability::ApprovePairing).await?;
+
+    let pairing_id = state
+        .challenges
+        .issue(&peer.tailnet_node_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(SunshinePairChallengeResponse {
+        pairing_id,
+        expires_in_seconds: state.challenges.ttl_seconds(),
+    }))
 }
 
 async fn sunshine_pair(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
-    Json(request): Json<SunshinePairRequest>,
+    ApiJson(request): ApiJson<SunshinePairRequest>,
 ) -> Result<Json<SunshinePairResponse>, ApiError> {
-    authorize(&state, source).await?;
-    state.sunshine.submit_pairing_pin(request).await?;
+    let peer = authorize(&state, source, ControlCapability::ApprovePairing).await?;
+
+    request.validate().map_err(|error| {
+        tracing::debug!(field = ?error, "sunshine.pairing_request_invalid");
+
+        ApiError::new(
+            ErrorCode::InvalidCommand,
+            "The pairing request is not valid.",
+        )
+    })?;
+
+    state
+        .challenges
+        .consume(&peer.tailnet_node_id, &request.pairing_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let client_name = request.client_name.clone();
+
+    state
+        .sunshine
+        .submit_pairing_pin(&request.pin, &request.client_name)
+        .await?;
+
+    let _ = state
+        .notifications
+        .send(Notification {
+            summary: "Omdesky".to_owned(),
+            body: format!("Approved stream pairing for {client_name}"),
+        })
+        .await;
+
+    tracing::info!("sunshine.pairing_approved");
+
     Ok(Json(SunshinePairResponse { paired: true }))
-}
-
-fn domain_error(error: DomainError) -> ApiError {
-    let code = match error {
-        DomainError::InvalidKeyChord => "INVALID_KEY_CHORD",
-        DomainError::InvalidWindowSelector => "INVALID_WINDOW_SELECTOR",
-        DomainError::InvalidSessionEndpoint => "INVALID_SESSION_ENDPOINT",
-        _ => "INVALID_COMMAND",
-    };
-
-    tracing::debug!(code, detail = %error, "request.validation_failed");
-    ApiError::new(
-        StatusCode::BAD_REQUEST,
-        code,
-        "The requested action is not valid.",
-        false,
-    )
 }
 
 fn validate_workspace_target(target: &WorkspaceTarget) -> Result<(), ApiError> {
@@ -446,125 +649,36 @@ fn validate_workspace_target(target: &WorkspaceTarget) -> Result<(), ApiError> {
         && (name.is_empty() || name.contains(char::is_whitespace))
     {
         return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "WORKSPACE_NOT_FOUND",
+            ErrorCode::WorkspaceNotFound,
             "The requested workspace name is not valid.",
-            false,
         ));
     }
 
     Ok(())
 }
 
-pub async fn authorize(state: &AgentState, source: SocketAddr) -> Result<(), ApiError> {
-    let identity = state
-        .mesh
-        .identify_source(source.ip())
+pub async fn authorize(
+    state: &AgentState,
+    source: SocketAddr,
+    required: ControlCapability,
+) -> Result<AuthorizedPeer, ApiError> {
+    state
+        .authorizer
+        .authorize(source.ip(), required)
         .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-                error.message,
-                false,
-            )
-        })?
-        .ok_or_else(unauthorized)?;
-
-    if identity.tailnet_node_id.is_empty() {
-        return Err(unauthorized());
-    }
-
-    let allowlist = state.access.list().await.map_err(|error| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ACCESS_STORE_FAILED",
-            error.message,
-            false,
-        )
-    })?;
-
-    if !allowlist.is_empty()
-        && !allowlist
-            .iter()
-            .any(|entry| entry.tailnet_node_id == identity.tailnet_node_id)
-    {
-        return Err(unauthorized());
-    }
-
-    Ok(())
-}
-
-fn unauthorized() -> ApiError {
-    ApiError::new(
-        StatusCode::UNAUTHORIZED,
-        "UNAUTHORIZED",
-        "This device is not allowed to control Omdesky.",
-        false,
-    )
-}
-
-pub struct ApiError {
-    status: StatusCode,
-    envelope: ErrorEnvelope,
-}
-
-impl ApiError {
-    pub fn new(
-        status: StatusCode,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        retryable: bool,
-    ) -> Self {
-        Self {
-            status,
-            envelope: ErrorEnvelope {
-                error: ProtocolError {
-                    code: code.into(),
-                    message: message.into(),
-                    retryable,
-                    details: Map::new(),
-                },
-            },
-        }
-    }
-}
-
-impl From<omdesky_application::ports::PortError> for ApiError {
-    fn from(error: omdesky_application::ports::PortError) -> Self {
-        let status = match error.code {
-            "HYPRLAND_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
-            "WORKSPACE_NOT_FOUND" | "WINDOW_NOT_FOUND" | "DISPLAY_NOT_FOUND" => {
-                StatusCode::NOT_FOUND
-            }
-            "SUNSHINE_NOT_INSTALLED" | "SUNSHINE_NOT_RUNNING" | "SUNSHINE_API_UNAVAILABLE" => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            "SUNSHINE_PAIRING_FAILED" => StatusCode::BAD_GATEWAY,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-
-        tracing::debug!(
-            code = error.code,
-            detail = %error.message,
-            retryable = error.retryable,
-            "request.port_error"
-        );
-
-        ApiError::new(status, error.code, error.user_message(), error.retryable)
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, Json(self.envelope)).into_response()
-    }
+        .map_err(ApiError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{authorize::AuthorizationError, replay::FreshnessError, session::SessionError};
     use omdesky_core::{KeyChord, KeyModifier, WindowSelector};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn source() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7)), 51234)
+    }
 
     #[test]
     fn test_controller_shortcut_notification_describes_capture_toggle() {
@@ -618,18 +732,61 @@ mod tests {
     }
 
     #[test]
-    fn test_port_error_response_hides_internal_details() {
-        let response = ApiError::from(omdesky_application::ports::PortError::new(
-            "HYPRLAND_UNAVAILABLE",
-            "hyprctl exited with status 1: socket path /run/user/1000/hypr/private",
-            true,
-        ));
+    fn test_callback_endpoint_must_match_the_authenticated_peer() {
+        let matching = callback_endpoint(
+            SessionEndpoint {
+                address: source().ip(),
+                port: 48155,
+            },
+            source(),
+        )
+        .expect("the caller's own address is accepted");
+        assert_eq!(matching.address, source().ip());
+        assert_eq!(matching.port, 48155);
 
-        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            response.envelope.error.message,
-            "The desktop could not be controlled. Make sure Hyprland is running."
-        );
-        assert!(!response.envelope.error.message.contains("/run/user"));
+        let loopback = callback_endpoint(
+            SessionEndpoint {
+                address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 8080,
+            },
+            source(),
+        )
+        .expect_err("a foreign callback address is rejected");
+        assert_eq!(loopback.code(), ErrorCode::InvalidCommand);
+
+        let other_peer = callback_endpoint(
+            SessionEndpoint {
+                address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)),
+                port: 48155,
+            },
+            source(),
+        )
+        .expect_err("another peer's address is rejected");
+        assert_eq!(other_peer.code(), ErrorCode::InvalidCommand);
+    }
+
+    fn status(error: impl Into<ApiError>) -> u16 {
+        error.into().code().http_status()
+    }
+
+    #[test]
+    fn test_authorization_failures_map_to_distinct_statuses() {
+        assert_eq!(status(AuthorizationError::Unauthorized), 401);
+        assert_eq!(status(AuthorizationError::Forbidden), 403);
+        assert_eq!(status(AuthorizationError::RateLimited), 429);
+        assert_eq!(status(AuthorizationError::Unavailable), 503);
+    }
+
+    #[test]
+    fn test_session_failures_map_to_distinct_statuses() {
+        assert_eq!(status(SessionError::OwnedByAnotherController), 409);
+        assert_eq!(status(SessionError::NotOwner), 403);
+        assert_eq!(status(SessionError::NotFound), 404);
+    }
+
+    #[test]
+    fn test_stale_and_replayed_requests_are_distinguished() {
+        assert_eq!(status(FreshnessError::Replayed), 409);
+        assert_eq!(status(FreshnessError::Stale), 400);
     }
 }

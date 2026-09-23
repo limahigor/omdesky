@@ -1,14 +1,53 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
-    CapturePolicy, ChildProcess, CommandOutput, CommandRunner, CommandSpec, PortError, PortResult,
-    StdinPolicy,
+    CapturePolicy, ChildProcess, CommandOutput, CommandRunner, CommandSpec, EnvironmentPolicy,
+    PortError, PortResult, StdinPolicy,
 };
-use std::{process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
     time::timeout,
 };
+
+pub const TRUSTED_PROGRAM_DIRECTORIES: [&str; 4] =
+    ["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin"];
+
+pub const TRUSTED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+const SESSION_ENVIRONMENT_KEYS: [&str; 14] = [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TERM",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_SESSION_TYPE",
+    "WAYLAND_DISPLAY",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+const LOADER_ENVIRONMENT_KEYS: [&str; 8] = [
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_PROFILE",
+    "LD_ORIGIN_PATH",
+    "GCONV_PATH",
+];
 
 #[derive(Clone, Debug, Default)]
 pub struct TokioCommandRunner;
@@ -17,7 +56,7 @@ pub struct TokioCommandRunner;
 impl CommandRunner for TokioCommandRunner {
     async fn run(&self, spec: CommandSpec) -> PortResult<CommandOutput> {
         let duration = spec.timeout;
-        let mut child = build_command(&spec)
+        let mut child = build_command(&spec)?
             .spawn()
             .map_err(|error| spawn_error(&spec.program, error))?;
         let stdout = child.stdout.take();
@@ -110,20 +149,53 @@ impl CommandRunner for TokioCommandRunner {
     }
 
     async fn spawn(&self, spec: CommandSpec) -> PortResult<Box<dyn ChildProcess>> {
-        let child = build_command(&spec)
+        let child = build_command(&spec)?
             .spawn()
             .map_err(|error| spawn_error(&spec.program, error))?;
         Ok(Box::new(TokioChildProcess { child }))
     }
 }
 
-fn build_command(spec: &CommandSpec) -> Command {
-    let mut command = Command::new(&spec.program);
+pub fn resolve_program(program: &str) -> PortResult<PathBuf> {
+    if program.contains('/') {
+        return Ok(PathBuf::from(program));
+    }
+
+    static RESOLVED: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    let cache = RESOLVED.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(cache) = cache.lock()
+        && let Some(path) = cache.get(program)
+    {
+        return Ok(path.clone());
+    }
+
+    let resolved = TRUSTED_PROGRAM_DIRECTORIES
+        .iter()
+        .map(|directory| Path::new(directory).join(program))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            PortError::new(
+                "COMMAND_NOT_AVAILABLE",
+                format!("{program} was not found in a trusted program directory"),
+                false,
+            )
+        })?;
+
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(program.to_owned(), resolved.clone());
+    }
+
+    Ok(resolved)
+}
+
+pub(crate) fn build_command(spec: &CommandSpec) -> PortResult<Command> {
+    let program = resolve_program(&spec.program)?;
+
+    let mut command = Command::new(program);
     command.args(&spec.args);
 
-    if spec.clear_environment {
-        command.env_clear();
-    }
+    apply_environment_policy(&mut command, spec);
 
     command.envs(&spec.environment);
 
@@ -149,7 +221,33 @@ fn build_command(spec: &CommandSpec) -> Command {
     }
 
     command.kill_on_drop(true);
-    command
+
+    Ok(command)
+}
+
+fn apply_environment_policy(command: &mut Command, spec: &CommandSpec) {
+    match spec.environment_policy {
+        EnvironmentPolicy::Empty => {
+            command.env_clear();
+        }
+        EnvironmentPolicy::Session => {
+            command.env_clear();
+            command.env("PATH", TRUSTED_PATH);
+
+            for key in SESSION_ENVIRONMENT_KEYS {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+        }
+        EnvironmentPolicy::Inherited => {
+            command.env("PATH", TRUSTED_PATH);
+
+            for key in LOADER_ENVIRONMENT_KEYS {
+                command.env_remove(key);
+            }
+        }
+    }
 }
 
 async fn read_limited(stream: Option<impl AsyncRead + Unpin>, limit: usize) -> PortResult<Vec<u8>> {
@@ -307,12 +405,63 @@ mod tests {
     #[tokio::test]
     async fn test_runner_can_clear_inherited_environment() {
         let runner = TokioCommandRunner;
-        let mut spec = CommandSpec::new("/usr/bin/env", []);
-        spec.clear_environment = true;
+        let mut spec =
+            CommandSpec::new("/usr/bin/env", []).with_environment_policy(EnvironmentPolicy::Empty);
         spec.environment.insert("LANG".to_owned(), "C".to_owned());
 
         let output = runner.run(spec).await.expect("command succeeds");
 
         assert_eq!(output.stdout, b"LANG=C\n");
+    }
+
+    #[tokio::test]
+    async fn test_session_policy_drops_loader_and_unlisted_variables() {
+        let runner = TokioCommandRunner;
+        let spec = CommandSpec::new("/usr/bin/env", []);
+
+        let output = runner.run(spec).await.expect("command succeeds");
+        let environment = String::from_utf8_lossy(&output.stdout);
+
+        assert!(environment.contains(&format!("PATH={TRUSTED_PATH}\n")));
+        assert!(!environment.contains("LD_PRELOAD="));
+        assert!(!environment.contains("CARGO_PKG_NAME="));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_policy_still_forces_the_trusted_path() {
+        let runner = TokioCommandRunner;
+        let spec = CommandSpec::new("/usr/bin/env", [])
+            .with_environment_policy(EnvironmentPolicy::Inherited);
+
+        let output = runner.run(spec).await.expect("command succeeds");
+        let environment = String::from_utf8_lossy(&output.stdout);
+
+        assert!(environment.contains(&format!("PATH={TRUSTED_PATH}\n")));
+        assert!(!environment.contains("LD_PRELOAD="));
+    }
+
+    #[test]
+    fn test_bare_program_names_resolve_only_from_trusted_directories() {
+        let resolved = resolve_program("env").expect("env is a trusted program");
+
+        assert!(
+            TRUSTED_PROGRAM_DIRECTORIES
+                .iter()
+                .any(|directory| resolved.starts_with(directory))
+        );
+        assert_eq!(
+            resolve_program("omdesky-definitely-not-installed")
+                .expect_err("unknown program")
+                .code,
+            "COMMAND_NOT_AVAILABLE"
+        );
+    }
+
+    #[test]
+    fn test_explicit_paths_are_preserved() {
+        assert_eq!(
+            resolve_program("/usr/bin/printf").expect("explicit path"),
+            std::path::PathBuf::from("/usr/bin/printf")
+        );
     }
 }

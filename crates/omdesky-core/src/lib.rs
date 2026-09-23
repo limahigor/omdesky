@@ -1,7 +1,10 @@
+#![forbid(unsafe_code)]
+
+pub mod text;
+
 use serde::{Deserialize, Serialize};
 use std::{fmt, net::IpAddr, str::FromStr};
 use thiserror::Error;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 macro_rules! uuid_id {
@@ -41,45 +44,35 @@ macro_rules! uuid_id {
 uuid_id!(NodeId);
 uuid_id!(SessionId);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NodeAlias(String);
-
-impl NodeAlias {
-    pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-        let value = value.into();
-        let trimmed = value.trim();
-        if trimmed.is_empty() || trimmed.len() > 64 {
-            return Err(DomainError::InvalidNodeAlias);
-        }
-
-        Ok(Self(trimmed.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for NodeAlias {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TailnetIdentity {
-    pub node_id: String,
-    pub user: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Ready,
+    Blocked,
     Offline,
-    AgentUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerCode {
     Incompatible,
+    Denied,
+    NeedsAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSide {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NodeBlocker {
+    pub code: BlockerCode,
+    pub side: BlockerSide,
+    pub fix: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -101,16 +94,6 @@ impl NodeCapabilities {
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Node {
-    pub id: NodeId,
-    pub hostname: String,
-    pub alias: Option<NodeAlias>,
-    pub tailnet: TailnetIdentity,
-    pub status: NodeStatus,
-    pub capabilities: NodeCapabilities,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -309,18 +292,6 @@ pub enum WorkspaceTarget {
     Name(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct WindowTarget {
-    pub id: WindowId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplaySelection {
-    Automatic,
-    Id(String),
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyModifier {
@@ -395,6 +366,7 @@ impl KeyChord {
 pub enum WindowSelector {
     ActiveWindow,
     Class(String),
+    Address(String),
 }
 
 impl WindowSelector {
@@ -408,6 +380,13 @@ impl WindowSelector {
                     Err(DomainError::InvalidWindowSelector)
                 }
             }
+            WindowSelector::Address(address) => {
+                if is_window_address(address) {
+                    Ok(())
+                } else {
+                    Err(DomainError::InvalidWindowSelector)
+                }
+            }
         }
     }
 
@@ -415,8 +394,31 @@ impl WindowSelector {
         match self {
             WindowSelector::ActiveWindow => "activewindow".to_owned(),
             WindowSelector::Class(class) => format!("class:{class}"),
+            WindowSelector::Address(address) => format!("address:{address}"),
         }
     }
+}
+
+pub fn is_tailscale_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+
+            octets[0] == 100 && (64..128).contains(&octets[1])
+        }
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+    }
+}
+
+pub fn is_window_address(value: &str) -> bool {
+    value.len() <= 34
+        && value.strip_prefix("0x").is_some_and(|hex| {
+            !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit())
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -442,6 +444,80 @@ impl SessionEndpoint {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionClaim {
+    pub id: SessionId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionGrant {
+    pub id: SessionId,
+    pub generation: u64,
+    pub lease_seconds: u64,
+}
+
+impl SessionGrant {
+    pub fn claim(&self) -> SessionClaim {
+        SessionClaim {
+            id: self.id,
+            generation: self.generation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlCapability {
+    ReadMetadata,
+    FocusWorkspace,
+    ControlSession,
+    SendShortcut,
+    CloseStream,
+    ApprovePairing,
+}
+
+impl ControlCapability {
+    pub const ALL: [Self; 6] = [
+        Self::ReadMetadata,
+        Self::FocusWorkspace,
+        Self::ControlSession,
+        Self::SendShortcut,
+        Self::CloseStream,
+        Self::ApprovePairing,
+    ];
+
+    pub const CALLBACK: [Self; 2] = [Self::SendShortcut, Self::CloseStream];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlCapability::ReadMetadata => "read_metadata",
+            ControlCapability::FocusWorkspace => "focus_workspace",
+            ControlCapability::ControlSession => "control_session",
+            ControlCapability::SendShortcut => "send_shortcut",
+            ControlCapability::CloseStream => "close_stream",
+            ControlCapability::ApprovePairing => "approve_pairing",
+        }
+    }
+}
+
+impl fmt::Display for ControlCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ControlCapability {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        ControlCapability::ALL
+            .into_iter()
+            .find(|capability| capability.as_str() == value)
+            .ok_or(DomainError::UnknownCapability)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RemoteCommand {
@@ -459,8 +535,11 @@ pub enum RemoteCommand {
         role: SessionRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<SessionEndpoint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<WindowSelector>,
     },
     DetachSession,
+    RenewSession,
 }
 
 impl RemoteCommand {
@@ -471,6 +550,7 @@ impl RemoteCommand {
             RemoteCommand::SwitchStreamDisplay { .. } => "switch_stream_display",
             RemoteCommand::AttachSession { .. } => "attach_session",
             RemoteCommand::DetachSession => "detach_session",
+            RemoteCommand::RenewSession => "renew_session",
         }
     }
 
@@ -482,30 +562,45 @@ impl RemoteCommand {
             }
             RemoteCommand::CloseWindow { window } => window.validate(),
             RemoteCommand::SwitchStreamDisplay { display } => display.validate(),
-            RemoteCommand::AttachSession { role, controller } => match role {
-                SessionRole::Remote => controller
-                    .as_ref()
-                    .ok_or(DomainError::InvalidSessionEndpoint)
-                    .and_then(SessionEndpoint::validate),
-                SessionRole::Controller => Ok(()),
-            },
-            RemoteCommand::DetachSession => Ok(()),
+            RemoteCommand::AttachSession {
+                role,
+                controller,
+                window,
+            } => {
+                if let Some(window) = window {
+                    window.validate()?;
+                }
+
+                match role {
+                    SessionRole::Remote => controller
+                        .as_ref()
+                        .ok_or(DomainError::InvalidSessionEndpoint)
+                        .and_then(SessionEndpoint::validate),
+                    SessionRole::Controller => Ok(()),
+                }
+            }
+            RemoteCommand::DetachSession | RemoteCommand::RenewSession => Ok(()),
         }
     }
 
     pub fn is_session_control(&self) -> bool {
         matches!(
             self,
-            RemoteCommand::AttachSession { .. } | RemoteCommand::DetachSession
+            RemoteCommand::AttachSession { .. }
+                | RemoteCommand::DetachSession
+                | RemoteCommand::RenewSession
         )
     }
 
-    pub fn controller_exclusive(&self) -> bool {
+    pub fn required_capability(&self) -> ControlCapability {
         match self {
-            RemoteCommand::SendShortcut { .. }
-            | RemoteCommand::CloseWindow { .. }
-            | RemoteCommand::SwitchStreamDisplay { .. } => false,
-            RemoteCommand::AttachSession { .. } | RemoteCommand::DetachSession => false,
+            RemoteCommand::SendShortcut { .. } | RemoteCommand::SwitchStreamDisplay { .. } => {
+                ControlCapability::SendShortcut
+            }
+            RemoteCommand::CloseWindow { .. } => ControlCapability::CloseStream,
+            RemoteCommand::AttachSession { .. }
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => ControlCapability::ControlSession,
         }
     }
 }
@@ -538,6 +633,38 @@ pub struct StreamProfile {
     pub bitrate_kbps: Option<u32>,
 }
 
+pub const MIN_STREAM_WIDTH: u32 = 320;
+pub const MAX_STREAM_WIDTH: u32 = 7680;
+pub const MIN_STREAM_HEIGHT: u32 = 240;
+pub const MAX_STREAM_HEIGHT: u32 = 4320;
+pub const MIN_STREAM_FPS: u16 = 15;
+pub const MAX_STREAM_FPS: u16 = 480;
+pub const MIN_STREAM_BITRATE_KBPS: u32 = 500;
+pub const MAX_STREAM_BITRATE_KBPS: u32 = 500_000;
+
+impl StreamProfile {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let within_range = (MIN_STREAM_WIDTH..=MAX_STREAM_WIDTH).contains(&self.width)
+            && (MIN_STREAM_HEIGHT..=MAX_STREAM_HEIGHT).contains(&self.height)
+            && (MIN_STREAM_FPS..=MAX_STREAM_FPS).contains(&self.fps)
+            && self.bitrate_kbps.is_none_or(|kbps| {
+                (MIN_STREAM_BITRATE_KBPS..=MAX_STREAM_BITRATE_KBPS).contains(&kbps)
+            });
+
+        if within_range {
+            Ok(())
+        } else {
+            Err(DomainError::InvalidStreamProfile)
+        }
+    }
+}
+
+pub fn bitrate_kbps_from_mbps(mbps: u32) -> Result<u32, DomainError> {
+    mbps.checked_mul(1000)
+        .filter(|kbps| (MIN_STREAM_BITRATE_KBPS..=MAX_STREAM_BITRATE_KBPS).contains(kbps))
+        .ok_or(DomainError::InvalidStreamProfile)
+}
+
 impl Default for StreamProfile {
     fn default() -> Self {
         Self {
@@ -558,86 +685,8 @@ pub enum InputMode {
     Remote,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    Idle,
-    ResolvingNode,
-    CheckingRemote,
-    CheckingStreamPairing,
-    Pairing,
-    PreparingRemote,
-    LaunchingMoonlight,
-    Connected,
-    Stopping,
-    Cleanup,
-    Failed,
-}
-
-impl SessionState {
-    pub fn transition(self, next: Self) -> Result<Self, DomainError> {
-        use SessionState::*;
-        let valid = matches!(
-            (self, next),
-            (Idle, ResolvingNode)
-                | (ResolvingNode, CheckingRemote)
-                | (CheckingRemote, CheckingStreamPairing)
-                | (CheckingStreamPairing, Pairing | PreparingRemote)
-                | (Pairing, PreparingRemote)
-                | (PreparingRemote, LaunchingMoonlight)
-                | (LaunchingMoonlight, Connected)
-                | (Connected, Stopping)
-                | (Stopping, Cleanup)
-                | (Failed, Cleanup)
-                | (Cleanup, Idle)
-        ) || matches!(
-            self,
-            ResolvingNode
-                | CheckingRemote
-                | CheckingStreamPairing
-                | Pairing
-                | PreparingRemote
-                | LaunchingMoonlight
-                | Connected
-        ) && next == Failed;
-
-        valid
-            .then_some(next)
-            .ok_or(DomainError::InvalidSessionTransition {
-                from: self,
-                to: next,
-            })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DesktopSession {
-    pub id: SessionId,
-    pub remote_node: String,
-    pub moonlight_pid: Option<u32>,
-    pub state: SessionState,
-    pub input_mode: InputMode,
-    pub target_display: Option<String>,
-    pub target_workspace: Option<WorkspaceId>,
-    pub started_at: OffsetDateTime,
-}
-
-impl DesktopSession {
-    pub fn transition(&mut self, next: SessionState) -> Result<(), DomainError> {
-        self.state = self.state.transition(next)?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum DomainError {
-    #[error("node alias must contain 1 to 64 non-whitespace characters")]
-    InvalidNodeAlias,
-    #[error("invalid session transition from {from:?} to {to:?}")]
-    InvalidSessionTransition {
-        from: SessionState,
-        to: SessionState,
-    },
     #[error("key chord key must be a short ASCII-alphanumeric token")]
     InvalidKeyChord,
     #[error("window selector is not a safe class token")]
@@ -646,16 +695,15 @@ pub enum DomainError {
     InvalidSessionEndpoint,
     #[error("display identifier is not a safe monitor token")]
     InvalidDisplayId,
+    #[error("stream profile is outside the supported resolution, frame rate or bitrate range")]
+    InvalidStreamProfile,
+    #[error("unknown control capability")]
+    UnknownCapability,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_node_alias_rejects_empty_input() {
-        assert_eq!(NodeAlias::new("  "), Err(DomainError::InvalidNodeAlias));
-    }
 
     #[test]
     fn test_capabilities_preserve_unknown_values() {
@@ -665,55 +713,6 @@ mod tests {
         ]);
 
         assert!(capabilities.contains("future.capability"));
-    }
-
-    #[test]
-    fn test_session_state_accepts_full_connect_lifecycle() {
-        let states = [
-            SessionState::ResolvingNode,
-            SessionState::CheckingRemote,
-            SessionState::CheckingStreamPairing,
-            SessionState::PreparingRemote,
-            SessionState::LaunchingMoonlight,
-            SessionState::Connected,
-            SessionState::Stopping,
-            SessionState::Cleanup,
-            SessionState::Idle,
-        ];
-        let final_state = states
-            .into_iter()
-            .try_fold(SessionState::Idle, SessionState::transition)
-            .expect("valid lifecycle");
-
-        assert_eq!(final_state, SessionState::Idle);
-    }
-
-    #[test]
-    fn test_session_state_allows_optional_pairing_step() {
-        assert_eq!(
-            SessionState::CheckingStreamPairing.transition(SessionState::Pairing),
-            Ok(SessionState::Pairing)
-        );
-    }
-
-    #[test]
-    fn test_session_state_rejects_invalid_transition() {
-        assert_eq!(
-            SessionState::Idle.transition(SessionState::Connected),
-            Err(DomainError::InvalidSessionTransition {
-                from: SessionState::Idle,
-                to: SessionState::Connected,
-            })
-        );
-    }
-
-    #[test]
-    fn test_failed_session_requires_cleanup() {
-        assert!(SessionState::Failed.transition(SessionState::Idle).is_err());
-        assert_eq!(
-            SessionState::Failed.transition(SessionState::Cleanup),
-            Ok(SessionState::Cleanup)
-        );
     }
 
     #[test]
@@ -754,6 +753,163 @@ mod tests {
     }
 
     #[test]
+    fn test_window_selector_rejects_unsafe_address() {
+        assert_eq!(
+            WindowSelector::Address("0x55; rm -rf /".to_owned()).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+        assert_eq!(
+            WindowSelector::Address("moonlight".to_owned()).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+        assert_eq!(
+            WindowSelector::Address(format!("0x{}", "a".repeat(64))).validate(),
+            Err(DomainError::InvalidWindowSelector)
+        );
+    }
+
+    #[test]
+    fn test_only_the_cgnat_range_counts_as_tailscale() {
+        assert!(is_tailscale_address(
+            "100.64.0.1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(is_tailscale_address(
+            "100.127.255.254".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.0.0.1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.63.255.255".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "100.128.0.1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "192.168.1.10".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "127.0.0.1".parse::<IpAddr>().expect("address")
+        ));
+    }
+
+    #[test]
+    fn test_only_the_tailscale_ula_prefix_counts_as_tailscale() {
+        assert!(is_tailscale_address(
+            "fd7a:115c:a1e0::1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "fd7a:0000:0000::1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "fd7a:115c:a1e1::1".parse::<IpAddr>().expect("address")
+        ));
+        assert!(!is_tailscale_address(
+            "::1".parse::<IpAddr>().expect("address")
+        ));
+    }
+
+    #[test]
+    fn test_capabilities_round_trip_through_their_wire_names() {
+        for capability in ControlCapability::ALL {
+            assert_eq!(
+                capability.as_str().parse::<ControlCapability>(),
+                Ok(capability)
+            );
+        }
+
+        assert_eq!(
+            "root_shell".parse::<ControlCapability>(),
+            Err(DomainError::UnknownCapability)
+        );
+    }
+
+    #[test]
+    fn test_commands_require_their_narrowest_capability() {
+        assert_eq!(
+            RemoteCommand::DetachSession.required_capability(),
+            ControlCapability::ControlSession
+        );
+        assert_eq!(
+            RemoteCommand::CloseWindow {
+                window: WindowSelector::ActiveWindow
+            }
+            .required_capability(),
+            ControlCapability::CloseStream
+        );
+        assert_eq!(
+            RemoteCommand::SwitchStreamDisplay {
+                display: DisplayId::from("DP-2")
+            }
+            .required_capability(),
+            ControlCapability::SendShortcut
+        );
+    }
+
+    #[test]
+    fn test_renew_session_is_session_control() {
+        let command: RemoteCommand =
+            serde_json::from_str(r#"{"action":"renew_session"}"#).expect("valid renew_session");
+
+        assert!(command.is_session_control());
+        assert_eq!(command.kind(), "renew_session");
+        assert!(command.validate().is_ok());
+    }
+
+    #[test]
+    fn test_session_grant_yields_a_matching_claim() {
+        let grant = SessionGrant {
+            id: SessionId::new(),
+            generation: 7,
+            lease_seconds: 30,
+        };
+
+        assert_eq!(
+            grant.claim(),
+            SessionClaim {
+                id: grant.id,
+                generation: 7
+            }
+        );
+    }
+
+    #[test]
+    fn test_stream_profile_rejects_out_of_range_geometry() {
+        let mut profile = StreamProfile::default();
+        assert!(profile.validate().is_ok());
+
+        profile.width = 0;
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+
+        let mut profile = StreamProfile {
+            fps: 1_000,
+            ..StreamProfile::default()
+        };
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+
+        profile.fps = 60;
+        profile.bitrate_kbps = Some(u32::MAX);
+        assert_eq!(profile.validate(), Err(DomainError::InvalidStreamProfile));
+    }
+
+    #[test]
+    fn test_bitrate_conversion_rejects_overflow_and_out_of_range_values() {
+        assert_eq!(bitrate_kbps_from_mbps(25), Ok(25_000));
+        assert_eq!(
+            bitrate_kbps_from_mbps(u32::MAX),
+            Err(DomainError::InvalidStreamProfile)
+        );
+        assert_eq!(
+            bitrate_kbps_from_mbps(4_300_000),
+            Err(DomainError::InvalidStreamProfile)
+        );
+        assert_eq!(
+            bitrate_kbps_from_mbps(0),
+            Err(DomainError::InvalidStreamProfile)
+        );
+    }
+
+    #[test]
     fn test_window_selector_rejects_unsafe_class() {
         assert_eq!(
             WindowSelector::Class("class:foo bar".to_owned()).validate(),
@@ -785,6 +941,7 @@ mod tests {
         let remote_without_controller = RemoteCommand::AttachSession {
             role: SessionRole::Remote,
             controller: None,
+            window: None,
         };
         assert_eq!(
             remote_without_controller.validate(),
@@ -794,6 +951,7 @@ mod tests {
         let controller_role = RemoteCommand::AttachSession {
             role: SessionRole::Controller,
             controller: None,
+            window: None,
         };
         assert!(controller_role.validate().is_ok());
     }
@@ -818,7 +976,6 @@ mod tests {
         assert!(command.validate().is_ok());
         assert_eq!(command.kind(), "switch_stream_display");
         assert!(!command.is_session_control());
-        assert!(!command.controller_exclusive());
     }
 
     #[test]

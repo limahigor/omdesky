@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{fs, path::Path};
+use std::fs;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rgb {
@@ -92,10 +92,6 @@ impl ThemeWatcher {
     }
 }
 
-pub fn load_theme(path: &Path) -> OmarchyTheme {
-    ThemeWatcher::new(path).theme
-}
-
 pub fn parse_theme(content: &str) -> Result<OmarchyTheme, ThemeError> {
     let raw: RawTheme = toml::from_str(content)?;
 
@@ -160,10 +156,10 @@ yellow = "#d8a657"
     }
 
     #[test]
-    fn test_load_theme_falls_back_when_current_theme_is_missing() {
-        let theme = load_theme(Path::new("/path/that/does/not/exist"));
+    fn test_watcher_falls_back_when_current_theme_is_missing() {
+        let watcher = ThemeWatcher::new("/path/that/does/not/exist");
 
-        assert_eq!(theme, OmarchyTheme::default());
+        assert_eq!(watcher.current(), &OmarchyTheme::default());
     }
 
     #[test]

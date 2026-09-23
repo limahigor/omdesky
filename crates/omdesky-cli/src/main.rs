@@ -1,37 +1,43 @@
+#![forbid(unsafe_code)]
+
+mod doctor;
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use omdesky_application::{
+    access::CallbackAccess,
+    discovery::{DiscoverNodes, DiscoveredNode, blocker_message},
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
         MeshNetwork, StreamHost,
     },
-    services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream, ensure_controller_ready},
+    readiness::ensure_controller_ready,
+    services::{ConnectNode, ConnectRequest, PairStream},
+    target::{PeerLookupError, display_name, find_peer},
 };
 use omdesky_core::{
-    CodecPreference, DisplayId, InputMode, KeyChord, KeyModifier, NodeId, RemoteCommand,
-    StreamProfile, WindowSelector, WorkspaceTarget,
+    CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, MeshPeer,
+    NodeId, NodeStatus, RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget,
+    bitrate_kbps_from_mbps,
+    text::{DISPLAY_NAME_LIMIT, sanitize_for_display},
 };
 use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{
-        Config, access_path, legacy_sunshine_credentials_path, runtime_session_path, state_dir,
-        sunshine_config_path,
-    },
-    hyprland::HyprlandAdapter,
+    config::{Config, access_path, runtime_session_path, state_dir, sunshine_config_path},
     input::HyprlandSessionKeybinds,
     launcher::DesktopLauncherStore,
     moonlight::MoonlightAdapter,
-    omarchy::{OmarchyNotificationAdapter, detect_version},
+    omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
+    session_record::{SessionRecord, SupervisedProcess},
     sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
-use omdesky_protocol::SunshinePairRequest;
+use omdesky_protocol::{CLI_SCHEMA, CommandRequest};
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
-#[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -94,11 +100,6 @@ enum Command {
     RemoteCmd {
         #[command(subcommand)]
         action: CommandAction,
-    },
-
-    Input {
-        #[command(subcommand)]
-        command: InputCommand,
     },
 
     Session {
@@ -173,14 +174,6 @@ enum InputArg {
 }
 
 #[derive(Subcommand)]
-enum InputCommand {
-    Status,
-    Local,
-    Remote,
-    Toggle,
-}
-
-#[derive(Subcommand)]
 enum CommandAction {
     SendShortcut {
         target: String,
@@ -191,8 +184,11 @@ enum CommandAction {
         #[arg(long)]
         key: String,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "window_address")]
         window_class: Option<String>,
+
+        #[arg(long)]
+        window_address: Option<String>,
 
         #[arg(long)]
         port: Option<u16>,
@@ -200,8 +196,11 @@ enum CommandAction {
     CloseWindow {
         target: String,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "window_address")]
         window_class: Option<String>,
+
+        #[arg(long)]
+        window_address: Option<String>,
 
         #[arg(long)]
         port: Option<u16>,
@@ -220,8 +219,15 @@ enum CommandAction {
 #[derive(Subcommand)]
 enum AccessCommand {
     List,
-    Allow { peer: String },
-    Revoke { peer: String },
+    Allow {
+        peer: String,
+
+        #[arg(long = "capability", value_name = "CAPABILITY")]
+        capabilities: Vec<String>,
+    },
+    Revoke {
+        peer: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,20 +237,18 @@ enum LauncherCommand {
     Remove { target: String },
 }
 
-#[cfg(debug_assertions)]
-fn init_debug_tracing() {
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 }
 
-#[cfg(not(debug_assertions))]
-fn init_debug_tracing() {}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_debug_tracing();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -264,11 +268,10 @@ async fn main() -> Result<()> {
         Some(Command::SunshinePin { pin, name }) => sunshine_pin(&pin, &name).await,
         Some(Command::Connect(args)) => connect(args).await,
         Some(Command::RemoteCmd { action }) => remote_command(action).await,
-        Some(Command::Input { command }) => input(command).await,
         Some(Command::Session { json }) => session(json).await,
         Some(Command::Disconnect) => disconnect().await,
         Some(Command::Access { command }) => access(command).await,
-        Some(Command::Doctor { json }) => doctor(json).await,
+        Some(Command::Doctor { json }) => doctor::run(json).await,
         Some(Command::Launcher { command }) => launcher(command).await,
         Some(Command::Setup) => setup().await,
     }
@@ -278,12 +281,6 @@ fn agent_client() -> Arc<HttpAgentClient> {
     Arc::new(HttpAgentClient::new())
 }
 
-fn sunshine_credential_store() -> Result<SunshineCredentialStore> {
-    Ok(SunshineCredentialStore::new(Some(
-        legacy_sunshine_credentials_path()?,
-    )))
-}
-
 async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
     let config = Config::load()?;
     let runner = Arc::new(TokioCommandRunner);
@@ -291,25 +288,56 @@ async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
     let discovery = DiscoverNodes::new(
         Arc::new(TailscaleAdapter::new(runner)),
         agent_client(),
+        Arc::new(FileAccessStore::new(access_path()?)),
         config.network.agent_port,
     );
     let nodes = discovery.execute(all_tailnet).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&nodes)?);
-    } else {
-        println!("NAME\tSTATUS\tLINK\tLATENCY");
-        for node in nodes {
-            println!(
-                "{}\t{:?}\t{:?}\t{}",
-                node.name,
-                node.status,
-                node.connection,
-                node.latency_ms
-                    .map_or_else(|| "—".to_owned(), |value| format!("{value}ms"))
-            );
+        return print_json(json!({ "devices": nodes }));
+    }
+
+    println!("NAME\tSTATUS\tLINK\tLATENCY");
+
+    for node in &nodes {
+        println!(
+            "{}\t{}\t{:?}\t{}",
+            node.name,
+            status_text(node),
+            node.connection,
+            node.latency_ms
+                .map_or_else(|| "—".to_owned(), |value| format!("{value}ms"))
+        );
+
+        for blocker in &node.blockers {
+            println!("  {}", blocker_message(&node.name, blocker));
         }
     }
+
+    Ok(())
+}
+
+fn status_text(node: &DiscoveredNode) -> &'static str {
+    if node.is_local {
+        return "this computer";
+    }
+
+    match node.status {
+        NodeStatus::Ready => "ready",
+        NodeStatus::Blocked => "blocked",
+        NodeStatus::Offline => "offline",
+        NodeStatus::Unavailable => "unavailable",
+    }
+}
+
+fn print_json(value: serde_json::Value) -> Result<()> {
+    let serde_json::Value::Object(mut fields) = value else {
+        anyhow::bail!("JSON output must be an object");
+    };
+
+    fields.insert("schema".to_owned(), json!(CLI_SCHEMA));
+
+    println!("{}", serde_json::to_string_pretty(&fields)?);
 
     Ok(())
 }
@@ -322,19 +350,19 @@ async fn info(target: &str, json: bool) -> Result<()> {
     let displays = client.displays(&endpoint).await?;
 
     if json {
-        println!("{}", json!({"node": node, "displays": displays}));
-    } else {
-        println!("{} ({})", node.hostname, node.node_id);
+        return print_json(json!({ "node": node, "displays": displays }));
+    }
+
+    println!("{} ({})", node.hostname, node.node_id);
+    println!(
+        "Omarchy {}  ·  agent {}",
+        node.omarchy_version, node.agent_version
+    );
+    for display in displays {
         println!(
-            "Omarchy {}  ·  agent {}",
-            node.omarchy_version, node.agent_version
+            "{} {}x{}@{}",
+            display.id, display.width, display.height, display.refresh_hz
         );
-        for display in displays {
-            println!(
-                "{} {}x{}@{}",
-                display.id, display.width, display.height, display.refresh_hz
-            );
-        }
     }
 
     Ok(())
@@ -345,15 +373,15 @@ async fn displays(target: &str, json: bool) -> Result<()> {
     let displays = HttpAgentClient::new().displays(&endpoint).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&displays)?);
-    } else {
-        for display in displays {
-            let marker = if display.focused { "●" } else { " " };
-            println!(
-                "{marker} {}\t{}x{}@{}",
-                display.id, display.width, display.height, display.refresh_hz
-            );
-        }
+        return print_json(json!({ "displays": displays }));
+    }
+
+    for display in displays {
+        let marker = if display.focused { "●" } else { " " };
+        println!(
+            "{marker} {}\t{}x{}@{}",
+            display.id, display.width, display.height, display.refresh_hz
+        );
     }
 
     Ok(())
@@ -367,20 +395,20 @@ async fn workspaces(target: &str, json: bool) -> Result<()> {
     let windows = client.windows(&endpoint).await.unwrap_or_default();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&workspaces)?);
-    } else {
-        for workspace in workspaces {
-            let name = workspace.name.as_deref().unwrap_or("—");
-            println!("{}  {name}", workspace.id);
-            for window in windows.iter().filter(|w| w.workspace == workspace.id) {
-                let label = window
-                    .title
-                    .as_deref()
-                    .or(window.app_id.as_deref())
-                    .or(window.class.as_deref())
-                    .unwrap_or("—");
-                println!("   {label}");
-            }
+        return print_json(json!({ "workspaces": workspaces }));
+    }
+
+    for workspace in workspaces {
+        let name = workspace.name.as_deref().unwrap_or("—");
+        println!("{}  {name}", workspace.id);
+        for window in windows.iter().filter(|w| w.workspace == workspace.id) {
+            let label = window
+                .title
+                .as_deref()
+                .or(window.app_id.as_deref())
+                .or(window.class.as_deref())
+                .unwrap_or("—");
+            println!("   {label}");
         }
     }
 
@@ -408,17 +436,17 @@ async fn windows(
         .collect::<Vec<_>>();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&windows)?);
-    } else {
-        println!("WORKSPACE\tAPP\tTITLE");
-        for window in windows {
-            println!(
-                "{}\t{}\t{}",
-                window.workspace,
-                window.app_id.or(window.class).as_deref().unwrap_or("—"),
-                window.title.as_deref().unwrap_or("—")
-            );
-        }
+        return print_json(json!({ "windows": windows }));
+    }
+
+    println!("WORKSPACE\tAPP\tTITLE");
+    for window in windows {
+        println!(
+            "{}\t{}\t{}",
+            window.workspace,
+            window.app_id.or(window.class).as_deref().unwrap_or("—"),
+            window.title.as_deref().unwrap_or("—")
+        );
     }
 
     Ok(())
@@ -441,16 +469,10 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
         runner,
         sunshine_config_path()?,
         omdesky_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        sunshine_credential_store()?,
+        SunshineCredentialStore::default(),
     );
 
-    adapter
-        .submit_pairing_pin(SunshinePairRequest {
-            pairing_id: None,
-            pin: pin.to_owned(),
-            client_name: name.to_owned(),
-        })
-        .await?;
+    adapter.submit_pairing_pin(pin, name).await?;
 
     println!("Submitted PIN to local Sunshine; Moonlight should finish pairing");
 
@@ -459,20 +481,27 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
 
 async fn connect(args: ConnectArgs) -> Result<()> {
     let config = Config::load()?;
+
+    let endpoint = resolve_endpoint(&args.target).await?;
+
     let client = agent_client();
     let controller_endpoint = local_agent_endpoint(config.network.agent_port)
         .await
         .map_err(|error| {
             anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
         })?;
-    let local_agent_available = client.health(&controller_endpoint).await.is_ok();
-    let sunshine_configured = sunshine_credential_store()?.configured().await?;
-    ensure_controller_ready(local_agent_available, sunshine_configured)?;
+    let local_agent = client.health(&controller_endpoint).await;
+    let sunshine_configured = SunshineCredentialStore::default().configured().await?;
+    ensure_controller_ready(local_agent, sunshine_configured)?;
 
-    let endpoint = resolve_endpoint(&args.target).await?;
     let notifications = Arc::new(OmarchyNotificationAdapter::default());
+    let callback_access = CallbackAccess::new(
+        Arc::new(TailscaleAdapter::new(Arc::new(TokioCommandRunner))),
+        Arc::new(FileAccessStore::new(access_path()?)),
+    );
     let service = ConnectNode::new(
         client,
+        callback_access,
         moonlight_adapter(),
         Arc::new(HyprlandSessionKeybinds::new(Arc::new(TokioCommandRunner))),
         notifications,
@@ -485,47 +514,79 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     };
     let focus_workspace = args.workspace.as_deref().map(parse_workspace_target);
 
+    let bitrate_mbps = args
+        .bitrate
+        .or_else(|| (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps));
+    let bitrate_kbps = bitrate_mbps
+        .map(bitrate_kbps_from_mbps)
+        .transpose()
+        .context("invalid stream bitrate")?;
+
+    let profile = StreamProfile {
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        codec_preference: match args.codec {
+            CodecArg::Auto => CodecPreference::Auto,
+            CodecArg::H264 => CodecPreference::H264,
+            CodecArg::Hevc => CodecPreference::Hevc,
+            CodecArg::Av1 => CodecPreference::Av1,
+        },
+        audio: !args.no_audio,
+        bitrate_kbps,
+    };
+    profile.validate().context("invalid stream profile")?;
+
     let session_path = runtime_session_path().ok();
-    write_session(session_path.as_deref(), &args.target, input_mode);
+    let mut record = SessionRecord::new(&args.target, input_mode);
+
+    if let Some(path) = &session_path
+        && let Err(error) = record.write(path)
+    {
+        tracing::debug!(detail = %error, "session.record_write_failed");
+    }
+
+    let record_path = session_path.clone();
+    let session_id = record.session_id;
 
     let exit = service
-        .execute(ConnectRequest {
-            endpoint: endpoint.clone(),
-            controller_endpoint,
-            profile: StreamProfile {
-                width: args.width,
-                height: args.height,
-                fps: args.fps,
-                codec_preference: match args.codec {
-                    CodecArg::Auto => CodecPreference::Auto,
-                    CodecArg::H264 => CodecPreference::H264,
-                    CodecArg::Hevc => CodecPreference::Hevc,
-                    CodecArg::Av1 => CodecPreference::Av1,
-                },
-                audio: !args.no_audio,
-                bitrate_kbps: args
-                    .bitrate
-                    .or_else(|| {
-                        (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps)
-                    })
-                    .map(|mbps| mbps * 1000),
+        .execute_with_started(
+            ConnectRequest {
+                endpoint: endpoint.clone(),
+                controller_endpoint,
+                profile,
+                fullscreen: args.fullscreen || !args.windowed,
+                input_mode,
+                focus_workspace,
+                focus_window: args.window.or(args.app_id),
+                auto_pair: true,
             },
-            fullscreen: args.fullscreen || !args.windowed,
-            input_mode,
-            focus_workspace,
-            focus_window: args.window.or(args.app_id),
-            auto_pair: true,
-        })
+            move |moonlight_pid| {
+                let record_path = record_path.clone();
+
+                async move {
+                    let Some(path) = record_path else {
+                        return;
+                    };
+
+                    record.moonlight = moonlight_pid.and_then(SupervisedProcess::observe);
+
+                    if let Err(error) = record.write(&path) {
+                        tracing::debug!(detail = %error, "session.record_update_failed");
+                    }
+                }
+            },
+        )
         .await;
 
     if let Some(path) = &session_path {
-        let _ = std::fs::remove_file(path);
+        SessionRecord::remove_if_owned(path, session_id);
     }
 
     let exit = exit?;
 
     if args.json {
-        println!("{}", json!({"exit_status": exit}));
+        return print_json(json!({ "exit_status": exit }));
     }
 
     Ok(())
@@ -546,33 +607,25 @@ async fn local_agent_endpoint(port: u16) -> Result<AgentEndpoint> {
     Ok(AgentEndpoint { address, port })
 }
 
-async fn input(command: InputCommand) -> Result<()> {
-    match command {
-        InputCommand::Status => {
-            let mode =
-                read_session().and_then(|value| value["input_mode"].as_str().map(str::to_owned));
-            println!("input mode: {}", mode.as_deref().unwrap_or("local"));
-            Ok(())
-        }
-        InputCommand::Local | InputCommand::Remote | InputCommand::Toggle => anyhow::bail!(
-            "live input switching is not supported by the installed Moonlight; set --input at connect time"
-        ),
-    }
-}
-
 async fn session(json: bool) -> Result<()> {
     match read_session() {
-        Some(value) => {
+        Some(record) => {
             if json {
-                println!("{value}");
-            } else {
-                println!(
-                    "node {}  ·  pid {}  ·  input {}",
-                    value["remote_node"].as_str().unwrap_or("—"),
-                    value["moonlight_pid"].as_i64().unwrap_or(0),
-                    value["input_mode"].as_str().unwrap_or("local")
-                );
+                return print_json(json!({ "session": record }));
             }
+
+            println!(
+                "node {}  ·  pid {}  ·  input {}",
+                sanitize_for_display(&record.remote_node, DISPLAY_NAME_LIMIT),
+                record
+                    .moonlight
+                    .map_or_else(|| "—".to_owned(), |process| process.pid.to_string()),
+                match record.input_mode {
+                    InputMode::Local => "local",
+                    InputMode::Remote => "remote",
+                }
+            );
+
             Ok(())
         }
         None => {
@@ -587,18 +640,24 @@ async fn session(json: bool) -> Result<()> {
 }
 
 async fn disconnect() -> Result<()> {
-    let value = read_session().context("no active Omdesky session to disconnect")?;
+    let path = runtime_session_path()?;
+    let record = SessionRecord::read(&path).context("no active Omdesky session to disconnect")?;
 
-    if let Some(pid) = value["moonlight_pid"].as_i64().filter(|pid| *pid > 0) {
-        terminate_process(pid as u32);
-        println!("Signalled Moonlight process {pid} to stop");
-    } else {
-        println!("Session has no supervised Moonlight process");
+    match record.moonlight {
+        Some(process) if process.is_still_running() => {
+            terminate_process(process.pid);
+            println!("Signalled Moonlight process {} to stop", process.pid);
+        }
+        Some(process) => {
+            println!(
+                "Moonlight process {} is no longer the one this session started; nothing was signalled",
+                process.pid
+            );
+        }
+        None => println!("Session has no supervised Moonlight process"),
     }
 
-    if let Ok(path) = runtime_session_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    SessionRecord::remove_if_owned(&path, record.session_id);
 
     Ok(())
 }
@@ -608,22 +667,37 @@ async fn access(command: AccessCommand) -> Result<()> {
     match command {
         AccessCommand::List => {
             for entry in store.list().await? {
+                let capabilities = entry
+                    .capabilities
+                    .iter()
+                    .map(|capability| capability.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+
                 println!(
-                    "{}\t{}",
-                    entry.tailnet_node_id,
-                    entry.label.as_deref().unwrap_or("—")
+                    "{}\t{}\t{}",
+                    sanitize_for_display(&entry.tailnet_node_id, DISPLAY_NAME_LIMIT),
+                    sanitize_for_display(entry.label.as_deref().unwrap_or("—"), DISPLAY_NAME_LIMIT),
+                    capabilities
                 );
             }
         }
-        AccessCommand::Allow { peer } => {
+        AccessCommand::Allow {
+            peer,
+            capabilities: requested,
+        } => {
+            let capabilities = parse_capabilities(&requested)?;
             let identity = resolve_tailnet_identity(&peer).await?;
+
             store
-                .allow(AllowedController {
-                    tailnet_node_id: identity,
-                    label: Some(peer.clone()),
-                    added_at: OffsetDateTime::now_utc(),
-                })
+                .allow(AllowedController::new(
+                    identity,
+                    Some(peer.clone()),
+                    OffsetDateTime::now_utc(),
+                    capabilities,
+                ))
                 .await?;
+
             println!("Allowed {peer}");
         }
         AccessCommand::Revoke { peer } => {
@@ -636,69 +710,6 @@ async fn access(command: AccessCommand) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn doctor(json: bool) -> Result<()> {
-    let runner = Arc::new(TokioCommandRunner);
-
-    let omarchy = detect_version(runner.as_ref()).await;
-    let tailscale = TailscaleAdapter::new(runner.clone()).local_node().await;
-    let hyprland = HyprlandAdapter::new(runner.clone()).displays_probe().await;
-    let sunshine = SunshineAdapter::with_api(
-        runner,
-        sunshine_config_path()?,
-        omdesky_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        sunshine_credential_store()?,
-    )
-    .readiness()
-    .await;
-
-    let credential_store = sunshine_credential_store()?;
-    let credential_status = tokio::task::spawn_blocking(move || credential_store.load())
-        .await
-        .context("query desktop Secret Service")?;
-    let sunshine_pairing = match credential_status {
-        Ok(Some(_)) => {
-            json!({"status": "PASS", "message": "Sunshine admin credentials configured on this host"})
-        }
-        Ok(None) => json!({
-            "status": "WARN",
-            "message": "Sunshine admin credentials missing; run `omdesky setup` on this host to enable pairing"
-        }),
-        Err(_) => json!({
-            "status": "FAIL",
-            "message": "The desktop Secret Service is unavailable or locked"
-        }),
-    };
-
-    let report = json!({
-        "omarchy": check(&omarchy),
-        "tailscale": check(&tailscale),
-        "hyprland": check(&hyprland),
-        "sunshine": check(&sunshine),
-        "sunshine_pairing": sunshine_pairing
-    });
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        for (name, value) in report.as_object().expect("object") {
-            println!(
-                "{name}: {} {}",
-                value["status"].as_str().unwrap_or("FAIL"),
-                value["message"].as_str().unwrap_or("")
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn check<T, E: std::fmt::Display>(result: &Result<T, E>) -> serde_json::Value {
-    match result {
-        Ok(_) => json!({"status": "PASS", "message": "available"}),
-        Err(error) => json!({"status": "FAIL", "message": error.to_string()}),
-    }
 }
 
 async fn launcher(command: LauncherCommand) -> Result<()> {
@@ -741,11 +752,11 @@ async fn setup() -> Result<()> {
 
     provision_sunshine_credentials().await?;
 
-    doctor(false).await
+    doctor::run(false).await
 }
 
 async fn provision_sunshine_credentials() -> Result<()> {
-    let store = sunshine_credential_store()?;
+    let store = SunshineCredentialStore::default();
     let lookup = store.clone();
 
     if tokio::task::spawn_blocking(move || lookup.load())
@@ -821,6 +832,7 @@ async fn remote_command(action: CommandAction) -> Result<()> {
             mods,
             key,
             window_class,
+            window_address,
             port,
         } => {
             let endpoint = match (target.parse::<IpAddr>(), port) {
@@ -830,12 +842,14 @@ async fn remote_command(action: CommandAction) -> Result<()> {
 
             let modifiers = parse_modifiers(&mods)?;
             let chord = KeyChord::new(modifiers, key).context("invalid key chord")?;
-            let window = window_class.map_or(WindowSelector::ActiveWindow, WindowSelector::Class);
+            let window = window_selector(window_class, window_address);
 
             let command = RemoteCommand::SendShortcut { chord, window };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
@@ -843,6 +857,7 @@ async fn remote_command(action: CommandAction) -> Result<()> {
         CommandAction::CloseWindow {
             target,
             window_class,
+            window_address,
             port,
         } => {
             let endpoint = match (target.parse::<IpAddr>(), port) {
@@ -850,12 +865,14 @@ async fn remote_command(action: CommandAction) -> Result<()> {
                 _ => resolve_endpoint(&target).await?,
             };
 
-            let window = window_class.map_or(WindowSelector::ActiveWindow, WindowSelector::Class);
+            let window = window_selector(window_class, window_address);
 
             let command = RemoteCommand::CloseWindow { window };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
@@ -875,12 +892,45 @@ async fn remote_command(action: CommandAction) -> Result<()> {
             };
             command.validate().context("invalid command")?;
 
-            agent_client().send_command(&endpoint, command).await?;
+            agent_client()
+                .send_command(&endpoint, CommandRequest::new(command))
+                .await?;
             println!("ok");
 
             Ok(())
         }
     }
+}
+
+fn window_selector(class: Option<String>, address: Option<String>) -> WindowSelector {
+    match (class, address) {
+        (_, Some(address)) => WindowSelector::Address(address),
+        (Some(class), None) => WindowSelector::Class(class),
+        (None, None) => WindowSelector::ActiveWindow,
+    }
+}
+
+fn parse_capabilities(values: &[String]) -> Result<Vec<ControlCapability>> {
+    if values.is_empty() {
+        return Ok(ControlCapability::ALL.to_vec());
+    }
+
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token.parse::<ControlCapability>().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown capability '{token}'; expected one of {}",
+                    ControlCapability::ALL
+                        .map(ControlCapability::as_str)
+                        .join(", ")
+                )
+            })
+        })
+        .collect()
 }
 
 fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>> {
@@ -898,15 +948,10 @@ fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>> {
         .collect()
 }
 
-async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
+async fn resolve_peer(target: &str) -> Result<MeshPeer> {
     let config = Config::load()?;
-    let port = config.network.agent_port;
 
-    if let Ok(address) = target.parse::<IpAddr>() {
-        return Ok(AgentEndpoint { address, port });
-    }
-
-    let resolved = config
+    let name = config
         .devices
         .get(target)
         .and_then(|device| device.alias.clone())
@@ -915,80 +960,51 @@ async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
     let peers = TailscaleAdapter::new(Arc::new(TokioCommandRunner))
         .peers()
         .await?;
-    let address = peers
-        .into_iter()
-        .find(|peer| {
-            peer.online
-                && (peer.hostname.as_deref() == Some(resolved.as_str())
-                    || peer.tailnet_node_id == resolved
-                    || peer
-                        .dns_name
-                        .as_deref()
-                        .is_some_and(|dns| dns.trim_end_matches('.').starts_with(&resolved)))
-        })
-        .and_then(|peer| {
-            peer.ips
-                .iter()
-                .find(|address| address.is_ipv4())
-                .or(peer.ips.first())
-                .copied()
-        })
-        .with_context(|| format!("no online Tailnet peer matches '{target}'"))?;
+
+    match find_peer(&peers, &name) {
+        Ok(peer) => Ok(peer.clone()),
+        Err(PeerLookupError::NotFound) => anyhow::bail!(
+            "no Tailscale device is named '{name}'; use a name or address shown by `omdesky devices --all-tailnet`"
+        ),
+        Err(PeerLookupError::Ambiguous(candidates)) => anyhow::bail!(
+            "'{name}' matches several Tailscale devices ({}); use one of those names or an address",
+            candidates.join(", ")
+        ),
+    }
+}
+
+async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
+    let port = Config::load()?.network.agent_port;
+
+    let peer = resolve_peer(target).await?;
+
+    if !peer.online {
+        anyhow::bail!("{} is offline in Tailscale", display_name(&peer));
+    }
+
+    let address = peer
+        .ips
+        .iter()
+        .find(|address| address.is_ipv4())
+        .or(peer.ips.first())
+        .copied()
+        .with_context(|| format!("{} has no Tailscale address", display_name(&peer)))?;
 
     Ok(AgentEndpoint { address, port })
 }
 
 async fn resolve_tailnet_identity(target: &str) -> Result<String> {
-    if let Ok(address) = target.parse::<IpAddr>() {
-        return TailscaleAdapter::new(Arc::new(TokioCommandRunner))
-            .identify_source(address)
-            .await?
-            .map(|identity| identity.tailnet_node_id)
-            .context("target is not a visible Tailscale identity");
-    }
-
-    TailscaleAdapter::new(Arc::new(TokioCommandRunner))
-        .peers()
-        .await?
-        .into_iter()
-        .find(|peer| peer.hostname.as_deref() == Some(target) || peer.tailnet_node_id == target)
-        .map(|peer| peer.tailnet_node_id)
-        .with_context(|| format!("no Tailnet peer matches '{target}'"))
+    Ok(resolve_peer(target).await?.tailnet_node_id)
 }
 
-fn write_session(path: Option<&std::path::Path>, node: &str, input_mode: InputMode) {
-    let Some(path) = path else {
-        return;
-    };
-
-    let record = json!({
-        "session_id": uuid_like(),
-        "remote_node": node,
-        "moonlight_pid": std::process::id(),
-        "input_mode": match input_mode {
-            InputMode::Local => "local",
-            InputMode::Remote => "remote",
-        },
-        "started_at": OffsetDateTime::now_utc().unix_timestamp(),
-    });
-
-    let _ = omdesky_platform::state::atomic_write_json(path, &record, false);
-}
-
-fn read_session() -> Option<serde_json::Value> {
-    let path = runtime_session_path().ok()?;
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn uuid_like() -> String {
-    uuid::Uuid::new_v4().to_string()
+fn read_session() -> Option<SessionRecord> {
+    SessionRecord::read(&runtime_session_path().ok()?).ok()
 }
 
 fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
+        let _ = std::process::Command::new("/usr/bin/kill")
             .arg(pid.to_string())
             .status();
     }

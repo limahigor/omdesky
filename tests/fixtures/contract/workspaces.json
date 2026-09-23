@@ -1,0 +1,11 @@
+{
+  "workspaces": [
+    {
+      "focused": true,
+      "id": 2,
+      "monitor": "DP-1",
+      "name": "code",
+      "windows": 3
+    }
+  ]
+}

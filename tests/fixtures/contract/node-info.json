@@ -1,0 +1,9 @@
+{
+  "agent_version": "0.2.0",
+  "capabilities": [
+    "desktop.stream-host"
+  ],
+  "hostname": "desk-b",
+  "node_id": "6f1c1b9e-8a3f-4b0e-9f5e-2d7c3a1b4e5f",
+  "omarchy_version": "4.0.1"
+}

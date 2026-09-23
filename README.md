@@ -14,7 +14,7 @@ Everything Omdesky does is available from the terminal interface. Run `omdesky` 
 - Choose the resolution, frame rate, codec, bitrate, and window mode
 - Follow the focused monitor while working on a multi-monitor desktop
 - Inspect remote displays, workspaces, and windows from the command line
-- Limit access to specific Tailscale devices
+- Limit access to specific Tailscale devices, per capability
 
 ## Requirements
 
@@ -35,21 +35,11 @@ On the computer you use as the controller:
 
 ## Install
 
-The fastest way is the one-line installer. It downloads the latest prebuilt
-binaries and installs the user service into your home directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/limahigor/omdesky/master/scripts/install.sh | bash
-```
-
-The standalone installer places binaries in `~/.local/bin` and writes a user service that points to that absolute location. Set `OMDESKY_BIN_DIR` to use another user-owned directory.
-
-Do not mix this method with the Arch package. Before switching to the package, remove `~/.local/bin/omdesky`, `~/.local/bin/omdesky-agent`, and `~/.config/systemd/user/omdesky-agent.service`, then run `systemctl --user daemon-reload`.
-
 ### Install with pacman (Arch / Omarchy)
 
-Prefer a package you can update and remove with `pacman`? Build the prebuilt
-package from the repository:
+This is the recommended method. The package pins the SHA-256 of the release
+tarball, so `makepkg` refuses to install an artifact that does not match what
+the repository committed:
 
 ```bash
 git clone https://github.com/limahigor/omdesky.git
@@ -57,8 +47,33 @@ cd omdesky/packaging/arch
 makepkg -p PKGBUILD-bin -si
 ```
 
+### Install with the standalone script
+
+Download the installer, read it, then run it. The installer verifies the
+SHA-256 of the release tarball and rejects archives containing absolute paths,
+`..` components, or links:
+
+```bash
+curl -fsSL -o install-omdesky.sh https://raw.githubusercontent.com/limahigor/omdesky/master/scripts/install.sh
+less install-omdesky.sh
+bash install-omdesky.sh
+```
+
+By default the installer downloads the checksum published next to the release
+archive, which only protects against corruption and partial tampering. Pin a
+checksum you obtained independently to also protect against a compromised
+release:
+
+```bash
+OMDESKY_SHA256=<digest> bash install-omdesky.sh
+```
+
+The standalone installer places binaries in `~/.local/bin` and writes a user service that points to that absolute location. Set `OMDESKY_BIN_DIR` to use another user-owned directory. Pass `--local <directory>` to install files you already have instead of downloading a release; the installer never picks up artifacts from the current directory on its own.
+
+Do not mix this method with the Arch package. Before switching to the package, remove `~/.local/bin/omdesky`, `~/.local/bin/omdesky-agent`, and `~/.config/systemd/user/omdesky-agent.service`, then run `systemctl --user daemon-reload`.
+
 To compile from source instead, use the standard `PKGBUILD` in the same
-directory with `makepkg -si`. Both packages install the binaries in `/usr/bin` and the user service in `/usr/lib/systemd/user`.
+`packaging/arch` directory with `makepkg -si`. Both packages install the binaries in `/usr/bin` and the user service in `/usr/lib/systemd/user`.
 
 ## Build from source
 
@@ -83,10 +98,13 @@ Run these commands on the computer you want to control:
 
 ```bash
 omdesky setup
+omdesky access allow controller-hostname
 systemctl --user enable --now omdesky-agent.service
 ```
 
 `omdesky setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
+
+`omdesky access allow` is required, not optional. The agent refuses every control request until the controller is listed. Run it on the controller too, naming this computer, because the remote desktop sends shortcut and display-switch commands back. A connection is refused until both entries exist, and `omdesky devices` shows which side is missing and the command that fixes it.
 
 Check the setup with:
 

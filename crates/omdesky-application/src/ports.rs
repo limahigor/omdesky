@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use omdesky_core::{
-    ConnectionKind, Display, DisplayId, InputMode, MeshPeer, NodeId, RemoteCommand,
-    RemoteDesktopTopology, SessionRole, StreamProfile, Window, Workspace, WorkspaceTarget,
+    ControlCapability, Display, DisplayId, InputMode, MeshPeer, NodeId, RemoteCommand,
+    RemoteDesktopTopology, SessionRole, StreamProfile, Window, WindowSelector, Workspace,
+    WorkspaceTarget,
 };
 use omdesky_protocol::{
-    ActiveWindowResponse, HealthResponse, NodeInfoResponse, SunshinePairRequest,
-    SunshineStatusResponse,
+    ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
+    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse,
 };
 use std::{collections::BTreeMap, net::IpAddr, path::PathBuf, time::Duration};
 use time::OffsetDateTime;
@@ -34,10 +35,10 @@ impl PortError {
 
     pub fn user_message(&self) -> &str {
         match self.code {
-            "AGENT_UNREACHABLE" | "PEER_OFFLINE" => {
+            "AGENT_UNREACHABLE" => {
                 "This device could not be reached. Check that it is online and connected to Tailscale."
             }
-            "AGENT_PROTOCOL_INVALID" => {
+            "AGENT_PROTOCOL_INVALID" | "AGENT_RESPONSE_LIMIT" | "AGENT_FIELD_LIMIT" => {
                 "This device sent an unexpected response. Make sure Omdesky is up to date on both devices."
             }
             "AGENT_REQUEST_FAILED" => {
@@ -84,6 +85,42 @@ impl PortError {
             "REMOTE_AGENT_UNAVAILABLE" => {
                 "The remote Omdesky agent stopped responding. The stream was closed."
             }
+            "VERSION_INCOMPATIBLE" => {
+                "The other device runs a different Omdesky release. Install the same version on both computers."
+            }
+            "LOCAL_AGENT_INCOMPATIBLE" => {
+                "The local Omdesky agent runs a different release. Restart omdesky-agent after upgrading."
+            }
+            "RATE_LIMITED" => "The other device is busy. Wait a moment and try again.",
+            "IDENTITY_UNAVAILABLE" => {
+                "The other device could not confirm this computer's Tailscale identity. Try again."
+            }
+            "REQUEST_STALE" => {
+                "The clocks of the two computers differ too much. Check their time settings."
+            }
+            "REQUEST_REPLAYED" => "This action was already applied.",
+            "PAIRING_CHALLENGE_INVALID" => "The pairing attempt expired. Start pairing again.",
+            "SESSION_ALREADY_OWNED" => "Another computer is already controlling this device.",
+            "SESSION_NOT_OWNED" | "SESSION_NOT_FOUND" | "SESSION_NOT_GRANTED" | "NO_CONTROLLER" => {
+                "The remote session is no longer active. Connect again."
+            }
+            "SESSION_EFFECTS_FAILED" => {
+                "The other device could not set up remote shortcuts. Make sure Hyprland is running there."
+            }
+            "MOONLIGHT_UNSUPPORTED" => "The installed Moonlight version is not supported.",
+            "INVALID_STREAM_PROFILE" => "The stream settings are outside the supported range.",
+            "CAPABILITY_DENIED" => {
+                "The other device does not allow this action. Grant it there with `omdesky access allow`."
+            }
+            "CALLBACK_ACCESS_MISSING" => {
+                "This computer does not let the other device send shortcuts back. Run `omdesky access allow` here, naming the other device."
+            }
+            "CONTROLLER_UNREACHABLE" => {
+                "The other device could not reach this computer's agent. Check that omdesky-agent is running here."
+            }
+            "PEER_IDENTITY_UNKNOWN" => {
+                "The other device could not be identified through Tailscale."
+            }
             "LOCAL_SUNSHINE_UNCONFIGURED" => {
                 "Sunshine is not configured on this device. Run `omdesky setup` and try again."
             }
@@ -94,11 +131,11 @@ impl PortError {
                 "This Omarchy version is not supported. Omarchy 4 is required."
             }
             "OMARCHY_VERSION_UNKNOWN" => "The installed Omarchy version could not be detected.",
-            "COMMAND_TIMED_OUT" => "The operation took too long. Please try again.",
+            "COMMAND_TIMEOUT" => "The operation took too long. Please try again.",
             "COMMAND_NOT_AVAILABLE" => {
                 "A required program is not installed or could not be started."
             }
-            "INVALID_COMMAND" | "COMMAND_NOT_EXECUTABLE" | "INVALID_SESSION_TRANSITION" => {
+            "INVALID_COMMAND" | "COMMAND_NOT_EXECUTABLE" => {
                 "This action is not available right now."
             }
             "LAUNCHER_IO_FAILED" => {
@@ -126,12 +163,6 @@ pub struct MeshNodeIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionInfo {
-    pub kind: ConnectionKind,
-    pub latency_ms: Option<u32>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEndpoint {
     pub address: IpAddr,
     pub port: u16,
@@ -143,6 +174,30 @@ pub struct StreamHostDescriptor {
     pub application: String,
 }
 
+pub const MAX_STREAM_APPLICATION_BYTES: usize = 64;
+
+impl StreamHostDescriptor {
+    pub fn validate(&self) -> PortResult<()> {
+        let name = self.application.as_str();
+        let accepted = !name.is_empty()
+            && name.len() <= MAX_STREAM_APPLICATION_BYTES
+            && !name.starts_with('-')
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, ' ' | '.' | '_' | '-')
+            });
+
+        if accepted {
+            Ok(())
+        } else {
+            Err(PortError::new(
+                "INVALID_STREAM_APPLICATION",
+                "the remote node advertised an unusable streaming application name",
+                false,
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingState {
     Paired,
@@ -150,9 +205,10 @@ pub enum PairingState {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingPairing {
-    pub pin: String,
+#[async_trait]
+pub trait PendingPairing: Send {
+    fn pin(&self) -> &str;
+    async fn complete(self: Box<Self>) -> PortResult<()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,6 +239,32 @@ pub struct AllowedController {
     pub tailnet_node_id: String,
     pub label: Option<String>,
     pub added_at: OffsetDateTime,
+    #[serde(default)]
+    pub capabilities: Vec<ControlCapability>,
+}
+
+impl AllowedController {
+    pub fn new(
+        tailnet_node_id: impl Into<String>,
+        label: Option<String>,
+        added_at: OffsetDateTime,
+        capabilities: impl IntoIterator<Item = ControlCapability>,
+    ) -> Self {
+        let mut capabilities: Vec<_> = capabilities.into_iter().collect();
+        capabilities.sort();
+        capabilities.dedup();
+
+        Self {
+            tailnet_node_id: tailnet_node_id.into(),
+            label,
+            added_at,
+            capabilities,
+        }
+    }
+
+    pub fn allows(&self, capability: ControlCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,7 +283,7 @@ pub struct CommandSpec {
     pub timeout: Duration,
     pub stdout_limit: usize,
     pub stderr_limit: usize,
-    pub clear_environment: bool,
+    pub environment_policy: EnvironmentPolicy,
     pub stdin: StdinPolicy,
     pub capture: CapturePolicy,
     pub redacted_arg_indexes: Vec<usize>,
@@ -217,12 +299,26 @@ impl CommandSpec {
             timeout: Duration::from_secs(10),
             stdout_limit: 1024 * 1024,
             stderr_limit: 64 * 1024,
-            clear_environment: false,
+            environment_policy: EnvironmentPolicy::Session,
             stdin: StdinPolicy::Null,
             capture: CapturePolicy::Both,
             redacted_arg_indexes: Vec::new(),
         }
     }
+
+    pub fn with_environment_policy(mut self, policy: EnvironmentPolicy) -> Self {
+        self.environment_policy = policy;
+
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EnvironmentPolicy {
+    #[default]
+    Session,
+    Inherited,
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,7 +358,6 @@ pub trait CommandRunner: Send + Sync {
 pub trait MeshNetwork: Send + Sync {
     async fn local_node(&self) -> PortResult<MeshNodeIdentity>;
     async fn peers(&self) -> PortResult<Vec<MeshPeer>>;
-    async fn connection_info(&self, tailnet_node_id: &str) -> PortResult<ConnectionInfo>;
 
     async fn identify_source(&self, source: IpAddr) -> PortResult<Option<MeshNodeIdentity>>;
 }
@@ -271,6 +366,10 @@ pub trait MeshNetwork: Send + Sync {
 pub trait AgentClient: Send + Sync {
     async fn health(&self, endpoint: &AgentEndpoint) -> PortResult<HealthResponse>;
     async fn node_info(&self, endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse>;
+    async fn granted_capabilities(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<Vec<ControlCapability>>;
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>>;
     async fn workspaces(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Workspace>>;
     async fn windows(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Window>>;
@@ -283,6 +382,10 @@ pub trait AgentClient: Send + Sync {
     async fn focus_window(&self, endpoint: &AgentEndpoint, window: &str) -> PortResult<()>;
     async fn sunshine_status(&self, endpoint: &AgentEndpoint)
     -> PortResult<SunshineStatusResponse>;
+    async fn sunshine_pair_challenge(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<SunshinePairChallengeResponse>;
     async fn sunshine_pair(
         &self,
         endpoint: &AgentEndpoint,
@@ -292,8 +395,8 @@ pub trait AgentClient: Send + Sync {
     async fn send_command(
         &self,
         endpoint: &AgentEndpoint,
-        command: RemoteCommand,
-    ) -> PortResult<()>;
+        request: CommandRequest,
+    ) -> PortResult<CommandResponse>;
 }
 
 #[async_trait]
@@ -315,6 +418,7 @@ pub trait CommandExecutor: Send + Sync {
 pub struct SessionKeybindConfig {
     pub role: SessionRole,
     pub controller: Option<AgentEndpoint>,
+    pub window: WindowSelector,
 }
 
 #[async_trait]
@@ -324,9 +428,17 @@ pub trait SessionKeybindInstaller: Send + Sync {
 }
 
 #[async_trait]
+pub trait StreamWindowLocator: Send + Sync {
+    async fn window_for_process(&self, pid: u32) -> PortResult<Option<WindowSelector>>;
+}
+
+#[async_trait]
 pub trait StreamClient: Send + Sync {
     async fn pairing_state(&self, host: &StreamHostDescriptor) -> PortResult<PairingState>;
-    async fn begin_pairing(&self, host: &StreamHostDescriptor) -> PortResult<PendingPairing>;
+    async fn begin_pairing(
+        &self,
+        host: &StreamHostDescriptor,
+    ) -> PortResult<Box<dyn PendingPairing>>;
     async fn launch(&self, request: StreamLaunchRequest) -> PortResult<Box<dyn ChildProcess>>;
 }
 
@@ -335,13 +447,7 @@ pub trait StreamHost: Send + Sync {
     async fn readiness(&self) -> PortResult<HostReadiness>;
     async fn status(&self) -> PortResult<SunshineStatusResponse>;
     async fn displays(&self) -> PortResult<Vec<Display>>;
-    async fn submit_pairing_pin(&self, request: SunshinePairRequest) -> PortResult<()>;
-}
-
-#[async_trait]
-pub trait DesktopEnvironment: Send + Sync {
-    async fn active_display(&self) -> PortResult<Option<Display>>;
-    async fn set_input_mode(&self, mode: InputMode) -> PortResult<()>;
+    async fn submit_pairing_pin(&self, pin: &str, client_name: &str) -> PortResult<()>;
 }
 
 #[async_trait]
@@ -365,11 +471,6 @@ pub trait AccessStore: Send + Sync {
     async fn list(&self) -> PortResult<Vec<AllowedController>>;
     async fn allow(&self, controller: AllowedController) -> PortResult<()>;
     async fn revoke(&self, tailnet_node_id: &str) -> PortResult<()>;
-    async fn is_allowed(&self, tailnet_node_id: &str) -> PortResult<bool>;
-}
-
-pub trait Clock: Send + Sync {
-    fn now(&self) -> OffsetDateTime;
 }
 
 #[async_trait]

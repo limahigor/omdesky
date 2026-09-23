@@ -1,0 +1,132 @@
+[
+  {
+    "code": "UNAUTHORIZED",
+    "retryable": false,
+    "status": 401
+  },
+  {
+    "code": "CAPABILITY_DENIED",
+    "retryable": false,
+    "status": 403
+  },
+  {
+    "code": "CALLBACK_ACCESS_MISSING",
+    "retryable": false,
+    "status": 403
+  },
+  {
+    "code": "RATE_LIMITED",
+    "retryable": true,
+    "status": 429
+  },
+  {
+    "code": "IDENTITY_UNAVAILABLE",
+    "retryable": true,
+    "status": 503
+  },
+  {
+    "code": "ACCESS_STORE_FAILED",
+    "retryable": false,
+    "status": 500
+  },
+  {
+    "code": "VERSION_INCOMPATIBLE",
+    "retryable": false,
+    "status": 409
+  },
+  {
+    "code": "CONTROLLER_UNREACHABLE",
+    "retryable": true,
+    "status": 502
+  },
+  {
+    "code": "NO_CONTROLLER",
+    "retryable": false,
+    "status": 409
+  },
+  {
+    "code": "INVALID_COMMAND",
+    "retryable": false,
+    "status": 400
+  },
+  {
+    "code": "REQUEST_STALE",
+    "retryable": false,
+    "status": 400
+  },
+  {
+    "code": "REQUEST_REPLAYED",
+    "retryable": false,
+    "status": 409
+  },
+  {
+    "code": "PAIRING_CHALLENGE_INVALID",
+    "retryable": false,
+    "status": 403
+  },
+  {
+    "code": "SESSION_ALREADY_OWNED",
+    "retryable": false,
+    "status": 409
+  },
+  {
+    "code": "SESSION_NOT_OWNED",
+    "retryable": false,
+    "status": 403
+  },
+  {
+    "code": "SESSION_NOT_FOUND",
+    "retryable": false,
+    "status": 404
+  },
+  {
+    "code": "SESSION_EFFECTS_FAILED",
+    "retryable": true,
+    "status": 503
+  },
+  {
+    "code": "HYPRLAND_UNAVAILABLE",
+    "retryable": true,
+    "status": 503
+  },
+  {
+    "code": "DISPLAY_NOT_FOUND",
+    "retryable": false,
+    "status": 404
+  },
+  {
+    "code": "WORKSPACE_NOT_FOUND",
+    "retryable": false,
+    "status": 404
+  },
+  {
+    "code": "WINDOW_NOT_FOUND",
+    "retryable": false,
+    "status": 404
+  },
+  {
+    "code": "SUNSHINE_NOT_INSTALLED",
+    "retryable": false,
+    "status": 503
+  },
+  {
+    "code": "SUNSHINE_NOT_RUNNING",
+    "retryable": true,
+    "status": 503
+  },
+  {
+    "code": "SUNSHINE_API_UNAVAILABLE",
+    "retryable": false,
+    "status": 503
+  },
+  {
+    "code": "SUNSHINE_PAIRING_FAILED",
+    "retryable": false,
+    "status": 502
+  },
+  {
+    "code": "INTERNAL_ERROR",
+    "retryable": false,
+    "status": 500
+  }
+]

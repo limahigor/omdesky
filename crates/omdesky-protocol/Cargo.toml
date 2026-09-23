@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 omdesky-core = { path = "../omdesky-core" }
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true

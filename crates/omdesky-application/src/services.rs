@@ -1,167 +1,17 @@
+use crate::access::CallbackAccess;
 use crate::ports::{
-    AgentClient, AgentEndpoint, ChildProcess, MeshNetwork, Notification, NotificationService,
-    PairingState, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
-    StreamClient, StreamHostDescriptor, StreamLaunchRequest,
+    AgentClient, AgentEndpoint, ChildProcess, Notification, NotificationService, PairingState,
+    PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller, StreamClient,
+    StreamHostDescriptor, StreamLaunchRequest, StreamWindowLocator,
 };
-use futures::{StreamExt, stream};
 use omdesky_core::{
-    ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
-    SessionEndpoint, SessionRole, SessionState, StreamProfile, WorkspaceTarget,
+    InputMode, RemoteCommand, SessionEndpoint, SessionGrant, SessionRole, StreamProfile,
+    WindowSelector, WorkspaceTarget,
 };
-use omdesky_protocol::{PROTOCOL_V1, SunshinePairRequest};
-use serde::Serialize;
-use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
+use omdesky_protocol::{CommandRequest, SunshinePairRequest};
+use std::{future::Future, sync::Arc};
 
-const MAX_DISCOVERY_PEERS: usize = 1024;
-const DISCOVERY_CONCURRENCY: usize = 16;
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct DiscoveredNode {
-    pub tailnet_node_id: String,
-    pub name: String,
-    pub address: IpAddr,
-    pub status: NodeStatus,
-    pub connection: ConnectionKind,
-    pub latency_ms: Option<u32>,
-    pub agent_version: Option<String>,
-    pub omarchy_version: Option<String>,
-    pub capabilities: NodeCapabilities,
-    pub is_local: bool,
-}
-
-pub struct DiscoverNodes {
-    mesh: Arc<dyn MeshNetwork>,
-    agent: Arc<dyn AgentClient>,
-    agent_port: u16,
-}
-
-impl DiscoverNodes {
-    pub fn new(mesh: Arc<dyn MeshNetwork>, agent: Arc<dyn AgentClient>, agent_port: u16) -> Self {
-        Self {
-            mesh,
-            agent,
-            agent_port,
-        }
-    }
-
-    pub async fn execute(&self, include_all_tailnet: bool) -> PortResult<Vec<DiscoveredNode>> {
-        let local = self.mesh.local_node().await?;
-        let peers = self.mesh.peers().await?;
-
-        if peers.len() > MAX_DISCOVERY_PEERS {
-            return Err(PortError::new(
-                "DISCOVERY_PEER_LIMIT",
-                "the tailnet contains too many peers to discover safely",
-                false,
-            ));
-        }
-
-        let mut nodes = Vec::new();
-
-        let local_peer = MeshPeer {
-            tailnet_node_id: local.tailnet_node_id,
-            dns_name: None,
-            hostname: local.hostname,
-            ips: local.addresses,
-            online: true,
-            connection: ConnectionKind::Direct,
-            latency_ms: Some(0),
-        };
-
-        if let Some(node) = self.probe(local_peer, include_all_tailnet, true).await {
-            nodes.push(node);
-        }
-
-        let probes = stream::iter(
-            peers
-                .into_iter()
-                .map(|peer| self.probe(peer, include_all_tailnet, false)),
-        )
-        .buffer_unordered(DISCOVERY_CONCURRENCY);
-
-        nodes.extend(
-            probes
-                .filter_map(std::future::ready)
-                .collect::<Vec<_>>()
-                .await,
-        );
-
-        nodes.sort_by(|left, right| {
-            right
-                .is_local
-                .cmp(&left.is_local)
-                .then(left.name.cmp(&right.name))
-        });
-
-        Ok(nodes)
-    }
-
-    async fn probe(
-        &self,
-        peer: MeshPeer,
-        include_all: bool,
-        is_local: bool,
-    ) -> Option<DiscoveredNode> {
-        let address = peer
-            .ips
-            .iter()
-            .find(|ip| ip.is_ipv4())
-            .or(peer.ips.first())
-            .copied()?;
-
-        let name = peer
-            .hostname
-            .clone()
-            .or(peer.dns_name.clone())
-            .unwrap_or_else(|| peer.tailnet_node_id.clone());
-
-        if !peer.online {
-            return include_all
-                .then(|| generic_node(peer, name, address, NodeStatus::Offline, is_local));
-        }
-
-        let endpoint = AgentEndpoint {
-            address,
-            port: self.agent_port,
-        };
-        let probe_started = Instant::now();
-        match self.agent.health(&endpoint).await {
-            Ok(health) if health.protocol == PROTOCOL_V1 => {
-                let latency_ms = measured_latency_ms(probe_started.elapsed(), is_local);
-                let info = self.agent.node_info(&endpoint).await.ok();
-                Some(DiscoveredNode {
-                    tailnet_node_id: peer.tailnet_node_id,
-                    name,
-                    address,
-                    status: NodeStatus::Ready,
-                    connection: peer.connection,
-                    latency_ms: Some(latency_ms),
-                    agent_version: info.as_ref().map(|value| value.agent_version.clone()),
-                    omarchy_version: info.as_ref().map(|value| value.omarchy_version.clone()),
-                    capabilities: info
-                        .map(|value| NodeCapabilities::new(value.capabilities))
-                        .unwrap_or_default(),
-                    is_local,
-                })
-            }
-            Ok(_) if include_all => Some(generic_node(
-                peer,
-                name,
-                address,
-                NodeStatus::Incompatible,
-                is_local,
-            )),
-            Err(_) if include_all => Some(generic_node(
-                peer,
-                name,
-                address,
-                NodeStatus::AgentUnknown,
-                is_local,
-            )),
-            _ => None,
-        }
-    }
-}
+pub const MOONLIGHT_WINDOW_CLASS: &str = "com.moonlight_stream.Moonlight";
 
 pub struct PairStream {
     agent: Arc<dyn AgentClient>,
@@ -213,17 +63,21 @@ impl PairStream {
             ));
         }
 
+        let challenge = self.agent.sunshine_pair_challenge(endpoint).await?;
         let pending = self.stream.begin_pairing(&host).await?;
+
         self.agent
             .sunshine_pair(
                 endpoint,
                 SunshinePairRequest {
-                    pairing_id: None,
-                    pin: pending.pin,
+                    pairing_id: challenge.pairing_id,
+                    pin: pending.pin().to_owned(),
                     client_name: self.client_name.clone(),
                 },
             )
             .await?;
+
+        pending.complete().await?;
 
         match self.stream.pairing_state(&host).await? {
             PairingState::Paired => Ok(()),
@@ -247,17 +101,24 @@ pub struct ConnectRequest {
     pub auto_pair: bool,
 }
 
+pub const STREAM_WINDOW_LOOKUP_ATTEMPTS: u32 = 20;
+pub const STREAM_WINDOW_LOOKUP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 pub struct ConnectNode {
     agent: Arc<dyn AgentClient>,
+    callback_access: CallbackAccess,
     stream: Arc<dyn StreamClient>,
     keybinds: Arc<dyn SessionKeybindInstaller>,
     notifications: Arc<dyn NotificationService>,
+    windows: Option<Arc<dyn StreamWindowLocator>>,
     pairing: PairStream,
 }
 
 impl ConnectNode {
     pub fn new(
         agent: Arc<dyn AgentClient>,
+        callback_access: CallbackAccess,
         stream: Arc<dyn StreamClient>,
         keybinds: Arc<dyn SessionKeybindInstaller>,
         notifications: Arc<dyn NotificationService>,
@@ -266,11 +127,49 @@ impl ConnectNode {
         let pairing = PairStream::new(agent.clone(), stream.clone(), client_name);
         Self {
             agent,
+            callback_access,
             stream,
             keybinds,
             notifications,
+            windows: None,
             pairing,
         }
+    }
+
+    pub fn with_window_locator(mut self, windows: Arc<dyn StreamWindowLocator>) -> Self {
+        self.windows = Some(windows);
+
+        self
+    }
+
+    async fn locate_stream_window(&self, pid: Option<u32>) -> WindowSelector {
+        let fallback = WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned());
+
+        let (Some(windows), Some(pid)) = (self.windows.as_ref(), pid) else {
+            return fallback;
+        };
+
+        for _ in 0..STREAM_WINDOW_LOOKUP_ATTEMPTS {
+            match windows.window_for_process(pid).await {
+                Ok(Some(window)) => return window,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        code = error.code,
+                        detail = %error.message,
+                        "session.window_lookup_failed"
+                    );
+
+                    return fallback;
+                }
+            }
+
+            tokio::time::sleep(STREAM_WINDOW_LOOKUP_INTERVAL).await;
+        }
+
+        tracing::warn!("session.window_lookup_timed_out");
+
+        fallback
     }
 
     pub async fn displays(
@@ -281,7 +180,7 @@ impl ConnectNode {
     }
 
     pub async fn execute(&self, request: ConnectRequest) -> PortResult<i32> {
-        self.execute_with_started(request, || async {}).await
+        self.execute_with_started(request, |_| async {}).await
     }
 
     pub async fn execute_with_started<F, Fut>(
@@ -290,9 +189,13 @@ impl ConnectNode {
         on_started: F,
     ) -> PortResult<i32>
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(Option<u32>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        self.callback_access
+            .verify(request.endpoint.address)
+            .await?;
+
         let status = self.agent.sunshine_status(&request.endpoint).await?;
 
         if !status.ready {
@@ -347,10 +250,22 @@ impl ConnectNode {
         )
         .await?;
         let process = self.stream.launch(stream_request).await?;
+        let moonlight_pid = process.id();
+
+        let mut grant = None;
+        let mut heartbeat = None;
 
         if request.input_mode == InputMode::Remote {
-            match self.attach_session(&request).await {
-                Ok(()) => {
+            let window = self.locate_stream_window(moonlight_pid).await;
+
+            match self.attach_session(&request, window).await {
+                Ok(session) => {
+                    heartbeat = Some(SessionHeartbeat::spawn(
+                        self.agent.clone(),
+                        request.endpoint.clone(),
+                        session,
+                    ));
+                    grant = Some(session);
                     let _ = self
                         .notifications
                         .send(Notification {
@@ -369,15 +284,17 @@ impl ConnectNode {
                         .notifications
                         .send(Notification {
                             summary: "Omdesky".to_owned(),
-                            body: "The stream started, but remote shortcuts are unavailable."
-                                .to_owned(),
+                            body: format!(
+                                "The stream started, but remote shortcuts are unavailable. {}",
+                                error.user_message()
+                            ),
                         })
                         .await;
                 }
             }
         }
 
-        on_started().await;
+        on_started(moonlight_pid).await;
 
         let exit = wait_for_process_or_monitor(
             process,
@@ -389,8 +306,10 @@ impl ConnectNode {
         )
         .await;
 
-        if request.input_mode == InputMode::Remote {
-            match self.detach_session(&request).await {
+        drop(heartbeat);
+
+        if let Some(grant) = grant {
+            match self.detach_session(&request, grant).await {
                 Ok(()) => {
                     let _ = self
                         .notifications
@@ -421,11 +340,16 @@ impl ConnectNode {
         exit
     }
 
-    async fn attach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+    async fn attach_session(
+        &self,
+        request: &ConnectRequest,
+        window: WindowSelector,
+    ) -> PortResult<SessionGrant> {
         self.keybinds
             .install(SessionKeybindConfig {
                 role: SessionRole::Controller,
                 controller: None,
+                window: window.clone(),
             })
             .await?;
 
@@ -434,37 +358,101 @@ impl ConnectNode {
             port: request.controller_endpoint.port,
         };
 
-        if let Err(error) = self
+        let attach = self
             .agent
             .send_command(
                 &request.endpoint,
-                RemoteCommand::AttachSession {
+                CommandRequest::new(RemoteCommand::AttachSession {
                     role: SessionRole::Remote,
                     controller: Some(controller),
-                },
+                    window: Some(window),
+                }),
             )
-            .await
-        {
-            let _ = self.keybinds.clear().await;
-            return Err(error);
-        }
+            .await;
 
-        Ok(())
+        match attach {
+            Ok(response) => response.session.ok_or_else(|| {
+                PortError::new(
+                    "SESSION_NOT_GRANTED",
+                    "the remote agent accepted the session without issuing a lease",
+                    false,
+                )
+            }),
+            Err(error) => {
+                let _ = self.keybinds.clear().await;
+                Err(error)
+            }
+        }
     }
 
-    async fn detach_session(&self, request: &ConnectRequest) -> PortResult<()> {
+    async fn detach_session(
+        &self,
+        request: &ConnectRequest,
+        grant: SessionGrant,
+    ) -> PortResult<()> {
         let local = self.keybinds.clear().await;
         let remote = self
             .agent
-            .send_command(&request.endpoint, RemoteCommand::DetachSession)
+            .send_command(
+                &request.endpoint,
+                CommandRequest::for_session(RemoteCommand::DetachSession, grant.claim()),
+            )
             .await;
 
-        local.and(remote)
+        local.and(remote.map(|_| ()))
     }
 }
 
 const AGENT_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const AGENT_HEALTH_FAILURE_LIMIT: u8 = 2;
+
+const MIN_RENEWAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub struct SessionHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl SessionHeartbeat {
+    fn spawn(agent: Arc<dyn AgentClient>, endpoint: AgentEndpoint, grant: SessionGrant) -> Self {
+        let interval = renewal_interval(grant.lease_seconds);
+
+        Self {
+            handle: tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.tick().await;
+
+                loop {
+                    ticker.tick().await;
+
+                    let renewal = agent
+                        .send_command(
+                            &endpoint,
+                            CommandRequest::for_session(RemoteCommand::RenewSession, grant.claim()),
+                        )
+                        .await;
+
+                    if let Err(error) = renewal {
+                        tracing::debug!(
+                            code = error.code,
+                            detail = %error.message,
+                            "session.renewal_failed"
+                        );
+                    }
+                }
+            }),
+        }
+    }
+}
+
+impl Drop for SessionHeartbeat {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn renewal_interval(lease_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(lease_seconds.max(1) / 3).max(MIN_RENEWAL_INTERVAL)
+}
 
 fn agent_health_failure(
     local_failures: u8,
@@ -562,70 +550,9 @@ where
     }
 }
 
-pub fn ensure_controller_ready(
-    local_agent_available: bool,
-    sunshine_configured: bool,
-) -> PortResult<()> {
-    if !local_agent_available {
-        return Err(PortError::new(
-            "LOCAL_AGENT_UNAVAILABLE",
-            "the local omdesky-agent is not running",
-            true,
-        ));
-    }
-
-    if !sunshine_configured {
-        return Err(PortError::new(
-            "LOCAL_SUNSHINE_UNCONFIGURED",
-            "Sunshine credentials are not configured on this controller",
-            false,
-        ));
-    }
-
-    Ok(())
-}
-
-pub fn next_state(current: SessionState, next: SessionState) -> PortResult<SessionState> {
-    current
-        .transition(next)
-        .map_err(|error| PortError::new("INVALID_SESSION_TRANSITION", error.to_string(), false))
-}
-
-fn measured_latency_ms(elapsed: std::time::Duration, is_local: bool) -> u32 {
-    if is_local {
-        return 0;
-    }
-
-    u32::try_from(elapsed.as_millis())
-        .unwrap_or(u32::MAX)
-        .max(1)
-}
-
-fn generic_node(
-    peer: MeshPeer,
-    name: String,
-    address: IpAddr,
-    status: NodeStatus,
-    is_local: bool,
-) -> DiscoveredNode {
-    DiscoveredNode {
-        tailnet_node_id: peer.tailnet_node_id,
-        name,
-        address,
-        status,
-        connection: peer.connection,
-        latency_ms: peer.latency_ms,
-        agent_version: None,
-        omarchy_version: None,
-        capabilities: NodeCapabilities::default(),
-        is_local,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     struct PendingProcess {
         terminated: Arc<std::sync::atomic::AtomicBool>,
@@ -687,39 +614,5 @@ mod tests {
     #[test]
     fn test_agent_health_failure_tolerates_one_transient_failure() {
         assert!(agent_health_failure(1, 1, 2).is_none());
-    }
-
-    #[test]
-    fn test_ensure_controller_ready_rejects_inactive_local_agent() {
-        let error = ensure_controller_ready(false, true).expect_err("inactive agent is rejected");
-
-        assert_eq!(error.code, "LOCAL_AGENT_UNAVAILABLE");
-    }
-
-    #[test]
-    fn test_ensure_controller_ready_rejects_missing_sunshine_configuration() {
-        let error = ensure_controller_ready(true, false).expect_err("missing setup is rejected");
-
-        assert_eq!(error.code, "LOCAL_SUNSHINE_UNCONFIGURED");
-    }
-
-    #[test]
-    fn test_ensure_controller_ready_accepts_configured_controller() {
-        assert!(ensure_controller_ready(true, true).is_ok());
-    }
-
-    #[test]
-    fn test_measured_latency_reports_zero_for_local_device() {
-        assert_eq!(measured_latency_ms(Duration::from_micros(500), true), 0);
-    }
-
-    #[test]
-    fn test_measured_latency_reports_at_least_one_millisecond_for_remote_device() {
-        assert_eq!(measured_latency_ms(Duration::from_micros(500), false), 1);
-    }
-
-    #[test]
-    fn test_measured_latency_preserves_remote_elapsed_milliseconds() {
-        assert_eq!(measured_latency_ms(Duration::from_millis(37), false), 37);
     }
 }

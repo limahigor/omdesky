@@ -4,7 +4,7 @@ This page covers building, testing, and diagnosing Omdesky from a source checkou
 
 ## Requirements
 
-Use Rust 1.88 or newer with Cargo, rustfmt, and Clippy. Most tests run on any Linux development machine. Testing real connections requires Omarchy 4, Hyprland, Tailscale, Sunshine, Moonlight Qt, and a user systemd session.
+The toolchain is pinned in `rust-toolchain.toml`; `rustup` selects it automatically. The minimum supported version is Rust 1.88. Most tests run on any Linux development machine. Testing real connections requires Omarchy 4, Hyprland, Tailscale, Sunshine, Moonlight Qt, and a user systemd session.
 
 ## Build and run
 
@@ -56,11 +56,49 @@ cargo test --workspace
 cargo build --release --workspace
 ```
 
+Continuous integration additionally runs the supply-chain checks and verifies that the binary package pins a checksum:
+
+```bash
+scripts/check-pkgbuild-sums.sh
+cargo audit --deny warnings
+cargo deny --all-features check
+```
+
 Tests cover validation, protocol data, command construction, Tailscale and Hyprland response parsing, Sunshine readiness, credentials, state files, desktop launchers, themes, and terminal rendering. Credential tests use an in-memory backend and do not require a live D-Bus session or Secret Service. They do not replace testing with live desktop services.
+
+`crates/omdesky-agent/tests/control_plane.rs` drives the real router with fake adapters and covers the control-plane rules end to end: an empty allowlist denying every protected route, capability enforcement, callback binding, session ownership and fencing, replay rejection, and the single-use pairing challenge.
+
+## Fuzzing
+
+`fuzz/` holds `cargo-fuzz` targets for the parsers and validators that read untrusted input. It is excluded from the workspace and needs a nightly toolchain:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz list
+cargo +nightly fuzz run tailscale_status
+```
+
+Targets cover Tailscale status and whois output, `hyprctl` output, the command and pairing request bodies, local configuration and session state, and the display-text sanitizer.
+
+## Wire contract
+
+`tests/fixtures/contract/` holds one JSON example of every control-protocol request and response, the error-code vocabulary, and the `omdesky devices --json` document. `crates/omdesky-application/tests/contract.rs` serializes the current types, compares them with these files, and checks that they round-trip.
+
+`contract.lock` records the release line (`major.minor`) and a digest of the fixtures. Computers only talk to peers on the same release line, so a wire change is a new line:
+
+1. Bump the minor version in `Cargo.toml`; a pre-release such as `0.3.0-dev` counts.
+2. Change the types.
+3. Record the new contract:
+
+```bash
+OMDESKY_UPDATE_CONTRACT=1 cargo test -p omdesky-application --test contract
+```
+
+Recording refuses to overwrite the lock when the digest changed but the release line did not, and the normal test run fails in the same case, so a patch release cannot change the contract by accident.
 
 ## Debug output
 
-Debug builds can emit structured runtime details through `RUST_LOG`:
+Every build emits structured runtime details on standard error, filtered by `RUST_LOG`. The agent defaults to `info`; the command-line tool defaults to `off`:
 
 ```bash
 RUST_LOG=debug cargo run -p omdesky-agent --bin omdesky-agent
@@ -87,15 +125,31 @@ Add `--json` when comparing output in a script or test.
 - `crates/omdesky-agent` provides the service that runs on a remote computer.
 - `crates/omdesky-cli` provides commands and starts the terminal interface.
 - `crates/omdesky-tui` renders and controls the terminal interface.
-- `packaging/arch` contains the Arch package definition.
+- `packaging/arch` contains the Arch package definitions.
 - `packaging/systemd` contains the user service.
+- `fuzz` contains the `cargo-fuzz` targets.
+- `scripts` contains the installer and the packaging checksum helpers.
 
 ## Packaging
 
-`packaging/arch/PKGBUILD` installs `omdesky`, `omdesky-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
+`packaging/arch/PKGBUILD` builds from source and installs `omdesky`, `omdesky-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
+
+`packaging/arch/PKGBUILD-bin` installs the published release tarball and must pin that tarball's SHA-256. After a release is published, repin it and commit the result:
+
+```bash
+scripts/update-pkgbuild-sums.sh 0.1.2
+```
+
+`scripts/check-pkgbuild-sums.sh` runs in CI and fails if the pin is missing or set to `SKIP`.
 
 After installing the package, enable the agent for the current user:
 
 ```bash
 systemctl --user enable --now omdesky-agent.service
+```
+
+Then allow at least one controller, since the agent refuses every control request until the allowlist has an entry:
+
+```bash
+omdesky access allow controller-hostname
 ```

@@ -1655,9 +1655,10 @@ dependencies = [
 
 [[package]]
 name = "omdesky-agent"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "omdesky-application",
  "omdesky-core",
@@ -1671,26 +1672,29 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
 name = "omdesky-application"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
  "omdesky-core",
  "omdesky-protocol",
  "serde",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "omdesky-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1710,18 +1714,17 @@ dependencies = [
 
 [[package]]
 name = "omdesky-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "time",
  "uuid",
 ]
 
 [[package]]
 name = "omdesky-platform"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "keyring",
@@ -1743,16 +1746,18 @@ dependencies = [
 
 [[package]]
 name = "omdesky-protocol"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "omdesky-core",
  "serde",
  "serde_json",
+ "time",
+ "uuid",
 ]
 
 [[package]]
 name = "omdesky-tui"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2243,9 +2248,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.44"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -2786,7 +2791,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

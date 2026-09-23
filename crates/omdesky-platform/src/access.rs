@@ -4,9 +4,6 @@ use omdesky_application::ports::{AccessStore, AllowedController, PortError, Port
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
-/// File-backed authorization allowlist keyed on Tailscale identity. Trust flows
-/// from Tailscale; this only narrows which Tailnet identities may drive the
-/// agent's control actions.
 #[derive(Clone)]
 pub struct FileAccessStore {
     path: PathBuf,
@@ -21,16 +18,34 @@ impl FileAccessStore {
         }
     }
 
-    fn read_all(&self) -> PortResult<Vec<AllowedController>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
+    fn read_blocking(path: &std::path::Path) -> PortResult<Vec<AllowedController>> {
+        match read_json(path) {
+            Ok(controllers) => Ok(controllers),
+            Err(crate::state::StateError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(state_error(error)),
         }
-
-        read_json(&self.path).map_err(state_error)
     }
 
-    fn write_all(&self, controllers: &[AllowedController]) -> PortResult<()> {
-        atomic_write_json(&self.path, controllers, false).map_err(state_error)
+    async fn read_all(&self) -> PortResult<Vec<AllowedController>> {
+        let path = self.path.clone();
+
+        tokio::task::spawn_blocking(move || Self::read_blocking(&path))
+            .await
+            .map_err(|_| state_error("the allowlist could not be read"))?
+    }
+
+    async fn write_all(&self, controllers: Vec<AllowedController>) -> PortResult<()> {
+        let path = self.path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            atomic_write_json(&path, &controllers, true).map_err(state_error)
+        })
+        .await
+        .map_err(|_| state_error("the allowlist could not be written"))?
     }
 }
 
@@ -38,32 +53,27 @@ impl FileAccessStore {
 impl AccessStore for FileAccessStore {
     async fn list(&self) -> PortResult<Vec<AllowedController>> {
         let _guard = self.lock.lock().await;
-        self.read_all()
+
+        self.read_all().await
     }
 
     async fn allow(&self, controller: AllowedController) -> PortResult<()> {
         let _guard = self.lock.lock().await;
-        let mut controllers = self.read_all()?;
+
+        let mut controllers = self.read_all().await?;
         controllers.retain(|candidate| candidate.tailnet_node_id != controller.tailnet_node_id);
         controllers.push(controller);
 
-        self.write_all(&controllers)
+        self.write_all(controllers).await
     }
 
     async fn revoke(&self, tailnet_node_id: &str) -> PortResult<()> {
         let _guard = self.lock.lock().await;
-        let mut controllers = self.read_all()?;
+
+        let mut controllers = self.read_all().await?;
         controllers.retain(|candidate| candidate.tailnet_node_id != tailnet_node_id);
 
-        self.write_all(&controllers)
-    }
-
-    async fn is_allowed(&self, tailnet_node_id: &str) -> PortResult<bool> {
-        let _guard = self.lock.lock().await;
-        Ok(self
-            .read_all()?
-            .iter()
-            .any(|candidate| candidate.tailnet_node_id == tailnet_node_id))
+        self.write_all(controllers).await
     }
 }
 
@@ -74,6 +84,7 @@ fn state_error(error: impl std::fmt::Display) -> PortError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omdesky_core::ControlCapability;
     use time::OffsetDateTime;
 
     #[tokio::test]
@@ -81,28 +92,30 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = FileAccessStore::new(directory.path().join("access/allowlist.json"));
         store
-            .allow(AllowedController {
-                tailnet_node_id: "node-abc".to_owned(),
-                label: Some("desktop-a".to_owned()),
-                added_at: OffsetDateTime::UNIX_EPOCH,
-            })
+            .allow(AllowedController::new(
+                "node-abc",
+                Some("desktop-a".to_owned()),
+                OffsetDateTime::UNIX_EPOCH,
+                ControlCapability::ALL,
+            ))
             .await
             .expect("identity allowed");
 
-        assert!(store.is_allowed("node-abc").await.expect("lookup"));
+        assert_eq!(store.list().await.expect("lookup").len(), 1);
         store.revoke("node-abc").await.expect("identity revoked");
-        assert!(!store.is_allowed("node-abc").await.expect("lookup"));
+        assert!(store.list().await.expect("lookup").is_empty());
     }
 
     #[tokio::test]
     async fn test_allow_is_idempotent_per_identity() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = FileAccessStore::new(directory.path().join("access/allowlist.json"));
-        let controller = AllowedController {
-            tailnet_node_id: "node-abc".to_owned(),
-            label: None,
-            added_at: OffsetDateTime::UNIX_EPOCH,
-        };
+        let controller = AllowedController::new(
+            "node-abc",
+            None,
+            OffsetDateTime::UNIX_EPOCH,
+            ControlCapability::ALL,
+        );
         store.allow(controller.clone()).await.expect("first");
         store.allow(controller).await.expect("second");
 

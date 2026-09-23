@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod access;
 pub mod agent_client;
 pub mod config;
@@ -9,7 +11,9 @@ pub mod launcher;
 pub mod moonlight;
 pub mod omarchy;
 pub mod process;
+pub mod session_record;
 pub mod state;
 pub mod sunshine;
+pub mod systemd;
 pub mod tailscale;
 pub mod theme;

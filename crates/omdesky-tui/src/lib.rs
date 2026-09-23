@@ -1,25 +1,29 @@
+#![forbid(unsafe_code)]
+
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
 use omdesky_application::{
+    access::CallbackAccess,
+    discovery::{DiscoverNodes, DiscoveredNode, blocker_message},
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork,
-        PortError,
+        PortError, StreamWindowLocator,
     },
-    services::{
-        ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode, ensure_controller_ready,
-    },
+    readiness::ensure_controller_ready,
+    services::{ConnectNode, ConnectRequest, MOONLIGHT_WINDOW_CLASS},
 };
 use omdesky_core::{
-    CodecPreference, ConnectionKind, DisplayMode, InputMode, NodeStatus, RemoteCommand,
-    StreamProfile, WindowSelector,
+    BlockerCode, CodecPreference, ConnectionKind, ControlCapability, DisplayMode, InputMode,
+    NodeStatus, RemoteCommand, StreamProfile, WindowSelector, bitrate_kbps_from_mbps,
 };
 use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{Config, access_path, legacy_sunshine_credentials_path, state_dir},
-    input::{HyprlandCommandExecutor, HyprlandSessionKeybinds, MOONLIGHT_WINDOW_CLASS},
+    config::{Config, access_path, state_dir},
+    hyprland::HyprlandAdapter,
+    input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
     moonlight::MoonlightAdapter,
     omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
@@ -34,7 +38,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph},
 };
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -60,7 +69,9 @@ struct Services {
     stream: Arc<MoonlightAdapter>,
     notifications: Arc<OmarchyNotificationAdapter>,
     desktop: Arc<HyprlandCommandExecutor>,
+    windows: Arc<HyprlandAdapter>,
     access: Arc<FileAccessStore>,
+    callback_access: CallbackAccess,
     sunshine_credentials: SunshineCredentialStore,
     agent_port: u16,
     client_name: String,
@@ -72,23 +83,25 @@ impl Services {
         let runner = Arc::new(TokioCommandRunner);
         let mesh = Arc::new(TailscaleAdapter::new(runner.clone()));
         let agent = Arc::new(HttpAgentClient::new());
+        let access = Arc::new(FileAccessStore::new(access_path()?));
 
         let _ = state_dir();
 
         Ok(Self {
             discovery: Arc::new(DiscoverNodes::new(
-                mesh,
+                mesh.clone(),
                 agent.clone(),
+                access.clone(),
                 config.network.agent_port,
             )),
+            callback_access: CallbackAccess::new(mesh, access.clone()),
             agent,
             stream: Arc::new(MoonlightAdapter::new(runner.clone())),
             notifications: Arc::new(OmarchyNotificationAdapter::default()),
-            desktop: Arc::new(HyprlandCommandExecutor::new(runner)),
-            access: Arc::new(FileAccessStore::new(access_path()?)),
-            sunshine_credentials: SunshineCredentialStore::new(Some(
-                legacy_sunshine_credentials_path()?,
-            )),
+            desktop: Arc::new(HyprlandCommandExecutor::new(runner.clone())),
+            windows: Arc::new(HyprlandAdapter::new(runner)),
+            access,
+            sunshine_credentials: SunshineCredentialStore::default(),
             agent_port: config.network.agent_port,
             client_name: env::var("HOSTNAME").unwrap_or_else(|_| "omdesky".to_owned()),
         })
@@ -97,11 +110,13 @@ impl Services {
     fn connect_service(&self) -> ConnectNode {
         ConnectNode::new(
             self.agent.clone(),
+            self.callback_access.clone(),
             self.stream.clone(),
             Arc::new(HyprlandSessionKeybinds::new(Arc::new(TokioCommandRunner))),
             self.notifications.clone(),
             self.client_name.clone(),
         )
+        .with_window_locator(self.windows.clone())
     }
 }
 
@@ -149,6 +164,9 @@ enum Overlay {
     CredentialsPass { user: String, pass: String },
     Access,
 }
+
+const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
+const ERROR_LIFETIME: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageKind {
@@ -206,6 +224,7 @@ enum AsyncMessage {
         generation: u64,
         node_id: String,
         node_name: String,
+        moonlight_pid: Option<u32>,
     },
     SessionEnded {
         generation: u64,
@@ -225,6 +244,7 @@ struct AppState {
     loading: bool,
     activity: Activity,
     active_node_id: Option<String>,
+    active_moonlight_pid: Option<u32>,
     pending_node: Option<DiscoveredNode>,
     session_generation: u64,
     notice: Option<String>,
@@ -238,6 +258,14 @@ struct AppState {
     detail_expanded: bool,
     detail_overflow: bool,
     detail_rect: Option<Rect>,
+    message_shown: Option<ShownMessage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShownMessage {
+    kind: MessageKind,
+    text: String,
+    since: Instant,
 }
 
 impl AppState {
@@ -249,6 +277,7 @@ impl AppState {
             loading: false,
             activity: Activity::Idle,
             active_node_id: None,
+            active_moonlight_pid: None,
             pending_node: None,
             session_generation: 0,
             notice: None,
@@ -262,6 +291,46 @@ impl AppState {
             detail_expanded: false,
             detail_overflow: false,
             detail_rect: None,
+            message_shown: None,
+        }
+    }
+
+    fn expire_message(&mut self, now: Instant) {
+        let Some((kind, text)) = self.message().map(|(kind, text)| (kind, text.to_owned())) else {
+            self.message_shown = None;
+            return;
+        };
+
+        let operation_pending = self.activity != Activity::Idle || self.pending_node.is_some();
+
+        let unchanged = self
+            .message_shown
+            .as_ref()
+            .is_some_and(|shown| shown.kind == kind && shown.text == text);
+
+        if operation_pending || !unchanged {
+            self.message_shown = Some(ShownMessage {
+                kind,
+                text,
+                since: now,
+            });
+            return;
+        }
+
+        let lifetime = match kind {
+            MessageKind::Notice => NOTICE_LIFETIME,
+            MessageKind::Error => ERROR_LIFETIME,
+        };
+
+        let expired = self
+            .message_shown
+            .as_ref()
+            .is_some_and(|shown| now.duration_since(shown.since) >= lifetime);
+
+        if expired {
+            self.error = None;
+            self.notice = None;
+            self.message_shown = None;
         }
     }
 
@@ -281,26 +350,34 @@ impl AppState {
 
     fn selected_remote(&self) -> Option<DiscoveredNode> {
         self.selected()
-            .filter(|node| !node.is_local && node.status == NodeStatus::Ready)
+            .filter(|node| node.is_connectable())
             .cloned()
     }
 
-    fn unavailable_reason(&self) -> Option<&str> {
+    fn unavailable_reason(&self) -> Option<String> {
         if let LocalReadiness::Blocked(error) = &self.local_readiness {
-            return Some(error);
+            return Some(error.clone());
         }
 
         if self.local_readiness == LocalReadiness::Checking {
-            return Some("Checking local connection requirements. Please wait.");
+            return Some("Checking local connection requirements. Please wait.".to_owned());
         }
 
         let node = self.selected()?;
+
         if node.is_local {
-            Some("This device cannot connect to itself")
-        } else if node.status != NodeStatus::Ready {
-            Some("This device is not ready")
-        } else {
-            None
+            return Some("This device cannot connect to itself".to_owned());
+        }
+
+        if let Some(blocker) = node.blockers.first() {
+            return Some(blocker_message(&node.name, blocker));
+        }
+
+        match node.status {
+            NodeStatus::Ready => None,
+            NodeStatus::Blocked | NodeStatus::Offline | NodeStatus::Unavailable => {
+                Some("This device is not ready".to_owned())
+            }
         }
     }
 
@@ -357,12 +434,16 @@ fn start_local_readiness(
 ) {
     tokio::spawn(async move {
         let endpoint = local_agent_endpoint(agent_port).await;
-        let agent_available = match endpoint {
-            Ok(endpoint) => agent.health(&endpoint).await.is_ok(),
-            Err(_) => false,
+        let local_agent = match endpoint {
+            Ok(endpoint) => agent.health(&endpoint).await,
+            Err(error) => Err(PortError::new(
+                "LOCAL_AGENT_UNAVAILABLE",
+                error.to_string(),
+                true,
+            )),
         };
         let sunshine_configured = credentials.configured().await.unwrap_or(false);
-        let result = ensure_controller_ready(agent_available, sunshine_configured)
+        let result = ensure_controller_ready(local_agent, sunshine_configured)
             .map_err(|error| error.user_message().to_owned());
 
         let _ = sender.send(AsyncMessage::LocalReadiness(result)).await;
@@ -407,9 +488,9 @@ fn start_connect(
                 return;
             }
         };
-        let local_agent_available = agent.health(&controller_endpoint).await.is_ok();
+        let local_agent = agent.health(&controller_endpoint).await;
         let sunshine_configured = credentials.configured().await.unwrap_or(false);
-        if let Err(error) = ensure_controller_ready(local_agent_available, sunshine_configured) {
+        if let Err(error) = ensure_controller_ready(local_agent, sunshine_configured) {
             let result = Err(user_error("The connection could not be completed.", &error));
             let _ = sender
                 .send(AsyncMessage::SessionEnded {
@@ -423,6 +504,7 @@ fn start_connect(
 
         let node_id = node.tailnet_node_id.clone();
         let node_name = node.name.clone();
+        let started_sender = sender.clone();
         let result = service
             .execute_with_started(
                 ConnectRequest {
@@ -435,12 +517,13 @@ fn start_connect(
                     focus_window: None,
                     auto_pair: true,
                 },
-                || async {
-                    let _ = sender
+                |moonlight_pid| async move {
+                    let _ = started_sender
                         .send(AsyncMessage::SessionStarted {
                             generation,
                             node_id,
                             node_name,
+                            moonlight_pid,
                         })
                         .await;
                 },
@@ -465,16 +548,32 @@ fn start_connect(
     });
 }
 
-fn start_focus(desktop: Arc<HyprlandCommandExecutor>, sender: mpsc::Sender<AsyncMessage>) {
+fn start_focus(
+    desktop: Arc<HyprlandCommandExecutor>,
+    windows: Arc<HyprlandAdapter>,
+    moonlight_pid: Option<u32>,
+    sender: mpsc::Sender<AsyncMessage>,
+) {
     tokio::spawn(async move {
+        let window = stream_window(windows.as_ref(), moonlight_pid).await;
+
         let result = desktop
-            .focus_stream()
+            .focus_stream(&window)
             .await
             .map(|_| "Focused the active stream.".to_owned())
             .map_err(|error| user_error("The active stream could not be focused.", &error));
 
         let _ = sender.send(AsyncMessage::Focus(result)).await;
     });
+}
+
+async fn stream_window(windows: &HyprlandAdapter, moonlight_pid: Option<u32>) -> WindowSelector {
+    let resolved = match moonlight_pid {
+        Some(pid) => windows.window_for_process(pid).await.ok().flatten(),
+        None => None,
+    };
+
+    resolved.unwrap_or_else(|| WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()))
 }
 
 async fn local_agent_endpoint(port: u16) -> anyhow::Result<AgentEndpoint> {
@@ -634,9 +733,11 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
             generation,
             node_id,
             node_name,
+            moonlight_pid,
         } if generation == state.session_generation => {
             state.activity = Activity::Idle;
             state.active_node_id = Some(node_id);
+            state.active_moonlight_pid = moonlight_pid;
             state.notice = Some(format!("Connected to {node_name}."));
             state.error = None;
         }
@@ -648,6 +749,7 @@ fn apply_message(state: &mut AppState, message: AsyncMessage) {
         } if generation == state.session_generation => {
             state.activity = Activity::Idle;
             state.active_node_id = None;
+            state.active_moonlight_pid = None;
             state.detail_expanded = false;
 
             if local_failure {
@@ -779,6 +881,8 @@ async fn run_loop(
             start_preflight(state, &services, node, sender.clone());
         }
 
+        state.expire_message(Instant::now());
+
         terminal.draw(|frame| draw(frame, state))?;
 
         if !event::poll(Duration::from_millis(80))? {
@@ -861,7 +965,7 @@ async fn handle_key(
             });
         }
         KeyCode::Enter => {
-            if let Some(reason) = state.unavailable_reason().map(str::to_owned) {
+            if let Some(reason) = state.unavailable_reason() {
                 state.error = Some(format!("ATTENTION: {reason}"));
                 state.notice = None;
             } else if let Some(node) = state.selected_remote() {
@@ -869,18 +973,25 @@ async fn handle_key(
                     SessionAction::Focus => {
                         state.notice = Some(format!("Focusing {}…", node.name));
                         state.error = None;
-                        start_focus(services.desktop.clone(), sender.clone());
+                        start_focus(
+                            services.desktop.clone(),
+                            services.windows.clone(),
+                            state.active_moonlight_pid,
+                            sender.clone(),
+                        );
                     }
                     SessionAction::Switch => {
                         state.pending_node = Some(node.clone());
                         state.notice = Some(format!("Switching to {}…", node.name));
                         state.error = None;
 
+                        let window =
+                            stream_window(services.windows.as_ref(), state.active_moonlight_pid)
+                                .await;
+
                         if let Err(error) = services
                             .desktop
-                            .execute(RemoteCommand::CloseWindow {
-                                window: WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()),
-                            })
+                            .execute(RemoteCommand::CloseWindow { window })
                             .await
                         {
                             state.pending_node = None;
@@ -998,11 +1109,12 @@ fn handle_overlay_key(
                 if let Some(node) = state.selected_remote() {
                     start_access_allow(
                         services.access.clone(),
-                        AllowedController {
-                            tailnet_node_id: node.tailnet_node_id.clone(),
-                            label: Some(node.name.clone()),
-                            added_at: OffsetDateTime::now_utc(),
-                        },
+                        AllowedController::new(
+                            node.tailnet_node_id.clone(),
+                            Some(node.name.clone()),
+                            OffsetDateTime::now_utc(),
+                            ControlCapability::ALL,
+                        ),
                         sender.clone(),
                     );
                     state.notice = Some(format!("Allowed {} to control this device", node.name));
@@ -1223,13 +1335,24 @@ fn draw_overlay(frame: &mut Frame<'_>, overlay: &Overlay, state: &AppState, them
 }
 
 fn stream_profile(config: &Config) -> StreamProfile {
-    StreamProfile {
+    let bitrate_kbps = (config.stream.bitrate_mbps > 0)
+        .then(|| bitrate_kbps_from_mbps(config.stream.bitrate_mbps).ok())
+        .flatten();
+
+    let profile = StreamProfile {
         width: config.stream.width,
         height: config.stream.height,
         fps: config.stream.fps,
         codec_preference: config.stream.codec,
         audio: config.stream.audio,
-        bitrate_kbps: (config.stream.bitrate_mbps > 0).then_some(config.stream.bitrate_mbps * 1000),
+        bitrate_kbps,
+    };
+
+    if profile.validate().is_ok() {
+        profile
+    } else {
+        tracing::debug!("config.stream_profile_out_of_range");
+        StreamProfile::default()
     }
 }
 
@@ -1422,7 +1545,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
     let ready = state
         .nodes
         .iter()
-        .filter(|node| !node.is_local && node.status == NodeStatus::Ready)
+        .filter(|node| node.is_connectable())
         .count();
     let total = state.nodes.iter().filter(|node| !node.is_local).count();
 
@@ -1656,7 +1779,7 @@ fn device_item(node: &DiscoveredNode, theme: &OmarchyTheme) -> ListItem<'static>
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("{}  {:<11}", status_icon(node), status_label(node.status)),
+                format!("{}  {:<12}", status_icon(node), status_label(node)),
                 status_style(node, theme),
             ),
             Span::styled(
@@ -1682,14 +1805,18 @@ fn device_glyph(node: &DiscoveredNode) -> &'static str {
 
 fn status_icon(node: &DiscoveredNode) -> &'static str {
     if node.is_local {
-        "󰐾"
-    } else {
-        match node.status {
-            NodeStatus::Ready => "󰄬",
-            NodeStatus::Offline => "󰅖",
-            NodeStatus::AgentUnknown => "󰋗",
-            NodeStatus::Incompatible => "󰀦",
-        }
+        return "󰐾";
+    }
+
+    match (
+        node.status,
+        node.blockers.first().map(|blocker| blocker.code),
+    ) {
+        (NodeStatus::Ready, _) => "󰄬",
+        (NodeStatus::Offline, _) => "󰅖",
+        (NodeStatus::Blocked, Some(BlockerCode::Incompatible)) => "󰀦",
+        (NodeStatus::Blocked, _) => "󰌾",
+        (NodeStatus::Unavailable, _) => "󰋗",
     }
 }
 
@@ -1760,7 +1887,7 @@ fn detail_lines(node: &DiscoveredNode, theme: &OmarchyTheme, width: usize) -> Ve
     lines.push(Line::default());
     lines.extend(wrapped_property_lines(
         "Status",
-        status_label(node.status),
+        status_label(node),
         width,
         theme,
     ));
@@ -1988,12 +2115,18 @@ fn empty_state_lines(state: &AppState, theme: &OmarchyTheme) -> Vec<Line<'static
     ]
 }
 
-fn status_label(status: NodeStatus) -> &'static str {
-    match status {
-        NodeStatus::Ready => "READY",
-        NodeStatus::Offline => "OFFLINE",
-        NodeStatus::AgentUnknown => "UNKNOWN",
-        NodeStatus::Incompatible => "INCOMPATIBLE",
+fn status_label(node: &DiscoveredNode) -> &'static str {
+    match (
+        node.status,
+        node.blockers.first().map(|blocker| blocker.code),
+    ) {
+        (NodeStatus::Ready, _) => "READY",
+        (NodeStatus::Offline, _) => "OFFLINE",
+        (NodeStatus::Unavailable, _) => "UNKNOWN",
+        (NodeStatus::Blocked, Some(BlockerCode::Incompatible)) => "INCOMPATIBLE",
+        (NodeStatus::Blocked, Some(BlockerCode::Denied)) => "DENIED",
+        (NodeStatus::Blocked, Some(BlockerCode::NeedsAccess)) => "NEEDS ACCESS",
+        (NodeStatus::Blocked, None) => "BLOCKED",
     }
 }
 
@@ -2009,10 +2142,14 @@ fn status_style(node: &DiscoveredNode, theme: &OmarchyTheme) -> Style {
     let status_color = if node.is_local {
         theme.muted
     } else {
-        match node.status {
-            NodeStatus::Ready => theme.success,
-            NodeStatus::Offline | NodeStatus::Incompatible => theme.error,
-            NodeStatus::AgentUnknown => theme.warning,
+        match (
+            node.status,
+            node.blockers.first().map(|blocker| blocker.code),
+        ) {
+            (NodeStatus::Ready, _) => theme.success,
+            (NodeStatus::Blocked, Some(BlockerCode::NeedsAccess))
+            | (NodeStatus::Unavailable, _) => theme.warning,
+            (NodeStatus::Blocked, _) | (NodeStatus::Offline, _) => theme.error,
         }
     };
 
@@ -2214,6 +2351,7 @@ mod tests {
             name: name.to_owned(),
             address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)),
             status: NodeStatus::Ready,
+            blockers: Vec::new(),
             connection: ConnectionKind::Direct,
             latency_ms: Some(4),
             agent_version: Some("0.1.0".to_owned()),
@@ -2225,6 +2363,85 @@ mod tests {
 
     fn state() -> AppState {
         AppState::new(ThemeWatcher::new(PathBuf::from("/nonexistent")))
+    }
+
+    #[test]
+    fn test_a_notice_disappears_after_its_lifetime() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Stream settings saved".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + NOTICE_LIFETIME - Duration::from_millis(1));
+
+        assert!(state.notice.is_some());
+
+        state.expire_message(start + NOTICE_LIFETIME);
+
+        assert!(state.notice.is_none());
+        assert!(state.message().is_none());
+    }
+
+    #[test]
+    fn test_an_error_stays_longer_than_a_notice() {
+        let mut state = state();
+        let start = Instant::now();
+        state.error = Some("The devices could not be paired.".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + NOTICE_LIFETIME);
+
+        assert!(state.error.is_some());
+
+        state.expire_message(start + ERROR_LIFETIME);
+
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn test_an_expired_error_does_not_reveal_an_older_notice() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Connected to desk.".to_owned());
+        state.error = Some("The stream ended.".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + ERROR_LIFETIME);
+
+        assert!(state.message().is_none());
+    }
+
+    #[test]
+    fn test_a_new_message_restarts_the_lifetime() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Stream settings saved".to_owned());
+
+        state.expire_message(start);
+
+        state.notice = Some("Display mode saved".to_owned());
+        state.expire_message(start + NOTICE_LIFETIME);
+        state.expire_message(start + NOTICE_LIFETIME + NOTICE_LIFETIME / 2);
+
+        assert_eq!(state.notice.as_deref(), Some("Display mode saved"));
+    }
+
+    #[test]
+    fn test_a_progress_message_stays_while_connecting() {
+        let mut state = state();
+        let start = Instant::now();
+        state.activity = Activity::Connecting;
+        state.notice = Some("Checking connection to desk…".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + ERROR_LIFETIME * 3);
+
+        assert!(state.notice.is_some());
+
+        state.activity = Activity::Idle;
+        state.expire_message(start + ERROR_LIFETIME * 3 + NOTICE_LIFETIME);
+
+        assert!(state.notice.is_none());
     }
 
     #[test]
@@ -2243,6 +2460,7 @@ mod tests {
             generation: 1,
             node_id: "tail-workstation".to_owned(),
             node_name: "workstation".to_owned(),
+            moonlight_pid: Some(4242),
         };
         let ended = AsyncMessage::SessionEnded {
             generation: 1,
@@ -2314,7 +2532,7 @@ mod tests {
         assert!(state.selected().is_some());
         assert!(state.selected_remote().is_none());
         assert_eq!(
-            state.unavailable_reason(),
+            state.unavailable_reason().as_deref(),
             Some("This device cannot connect to itself")
         );
     }
@@ -2327,7 +2545,7 @@ mod tests {
             LocalReadiness::Blocked("The local agent is not running.".to_owned());
 
         assert_eq!(
-            state.unavailable_reason(),
+            state.unavailable_reason().as_deref(),
             Some("The local agent is not running.")
         );
     }

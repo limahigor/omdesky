@@ -69,6 +69,8 @@ List available computers:
 omdesky devices
 ```
 
+Each device is `ready`, `blocked`, `offline` or `unavailable`. A blocked device is followed by one line per problem that says what is wrong and which command fixes it, and on which computer to run it.
+
 Start a stream by using the displayed device name:
 
 ```bash
@@ -117,9 +119,11 @@ omdesky windows workstation --workspace 2
 omdesky windows workstation --app-id firefox
 ```
 
-Add `--json` when you need structured output for a script.
+Add `--json` when you need structured output for a script. Every JSON document is an object with a `schema` number, currently `1`, next to the requested data, such as `devices`, `displays`, `workspaces`, `windows`, `session` or `exit_status`. A script should check `schema` before reading the rest.
 
-A target can be a visible Tailscale hostname, Tailnet IP address, stable Tailscale node ID, or a device name from your Omdesky configuration.
+In `devices`, each entry carries `status` and a `blockers` list. Every blocker has a `code` (`incompatible`, `denied` or `needs_access`), the `side` that has to change (`local` or `remote`), and a `fix` with the command or action to take on that side; `fix` never names the computer, `side` does.
+
+A target is the name Tailscale shows for the device (such as `hoppe` or `"POCO X3 Pro"`, in any letter case), its MagicDNS name (`poco-x3-pro` or `hoppe.tail1234.ts.net`), its stable Tailscale node ID, one of its Tailnet IP addresses, or a device name from your Omdesky configuration. The name must match exactly: a prefix such as `hop` never selects `hoppe`. When two devices share a name, the command lists their MagicDNS names so you can pick one, and an offline device is reported as offline rather than unknown. `omdesky access allow` resolves names the same way.
 
 ## End a command-line session
 
@@ -132,9 +136,9 @@ omdesky disconnect
 
 The terminal interface manages its own session and does not create a command-line session record.
 
-## Restrict access
+## Allow a controller
 
-Tailscale controls which devices can reach the agent. Omdesky can add a second local restriction on the remote computer:
+Tailscale controls which devices can reach the agent. Omdesky decides which of them may actually control it, and it decides by an explicit list:
 
 ```bash
 omdesky access allow controller-hostname
@@ -142,7 +146,15 @@ omdesky access list
 omdesky access revoke controller-hostname
 ```
 
-Once at least one controller is listed, other Tailscale devices are refused. Run these commands on each remote computer you want to protect.
+Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other. Omdesky checks both entries before it pairs or starts a stream and refuses the connection if either is missing; `omdesky devices` marks such a device as blocked and prints the `omdesky access allow` command to run, and on which computer.
+
+Narrow a grant with `--capability` when a device should do less than everything:
+
+```bash
+omdesky access allow laptop --capability read_metadata --capability focus_workspace
+```
+
+The available capabilities are `read_metadata`, `focus_workspace`, `control_session`, `send_shortcut`, `close_stream` and `approve_pairing`. See [Configuration and access control](configuration.md) for what each one covers.
 
 ## Troubleshooting
 
@@ -151,6 +163,35 @@ Start on the computer reporting the problem:
 ```bash
 omdesky doctor
 ```
+
+Each check reports `PASS`, `WARN` or `FAIL`, and the command exits with a non-zero status when any check fails:
+
+- `omarchy`, `tailscale`, `hyprland` and `sunshine` confirm the tools Omdesky drives are present and answering.
+- `sunshine_pairing` confirms the Sunshine credentials are in the desktop keyring.
+- `agent` confirms the local agent answers and runs the same release line and protocol as the command; after an upgrade it asks you to restart the service.
+- `agent_service` compares the binary the user service runs with the one you invoked, which catches a packaged agent left running next to a newer standalone install.
+- `access` warns when the allowlist is empty or holds entries from an earlier release that grant nothing.
+- `devices` lists every blocked device with the command that fixes it and the computer to run it on.
+
+### Read the agent log
+
+The agent writes to the user journal at the `info` level:
+
+```bash
+omdesky-agent --version
+journalctl --user -u omdesky-agent -e
+```
+
+For more detail, raise the level with a drop-in and restart the service:
+
+```bash
+systemctl --user edit omdesky-agent
+# add:  [Service]
+#       Environment=RUST_LOG=debug
+systemctl --user restart omdesky-agent
+```
+
+The command-line tool and terminal interface stay silent unless `RUST_LOG` is set, so logging never draws over the interface or mixes with `--json` output; log lines always go to standard error.
 
 ### No devices appear
 

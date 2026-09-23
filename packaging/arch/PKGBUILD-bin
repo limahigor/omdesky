@@ -11,7 +11,7 @@ depends=('tailscale' 'sunshine' 'moonlight-qt')
 provides=('omdesky')
 conflicts=('omdesky')
 source=("$url/releases/download/v$pkgver/omdesky-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('5bb52aba4b19654502f80956b99953acce7f246ea731bb999b90332b7c36339c')
 
 package() {
   local src="$srcdir/omdesky-$pkgver-x86_64-linux"

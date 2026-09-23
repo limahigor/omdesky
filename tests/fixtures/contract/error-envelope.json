@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "SESSION_NOT_OWNED",
+    "message": "This device does not own it.",
+    "retryable": false
+  }
+}

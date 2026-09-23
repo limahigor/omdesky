@@ -1,0 +1,12 @@
+{
+  "windows": [
+    {
+      "app_id": "firefox",
+      "class": "firefox",
+      "focused": true,
+      "id": "0x55aa",
+      "title": "Omdesky",
+      "workspace": 2
+    }
+  ]
+}

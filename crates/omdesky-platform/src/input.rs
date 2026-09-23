@@ -16,39 +16,37 @@ struct Keybind {
     allow_input_capture: bool,
 }
 
-fn session_keybinds() -> Vec<Keybind> {
+fn session_keybinds(window: &WindowSelector) -> Vec<Keybind> {
     vec![
         Keybind {
             trigger: "SUPER + R",
             description: "toggle remote shortcut capture",
-            command: moonlight_shortcut("Z"),
+            command: capture_toggle_command(window.clone()),
             allow_input_capture: true,
         },
         Keybind {
             trigger: "SUPER + Q",
             description: "close remote session",
-            command: moonlight_close_command(),
+            command: RemoteCommand::CloseWindow {
+                window: window.clone(),
+            },
             allow_input_capture: true,
         },
     ]
 }
 
-fn moonlight_shortcut(key: &str) -> RemoteCommand {
-    let chord = KeyChord::new(
+pub fn capture_toggle_chord() -> KeyChord {
+    KeyChord::new(
         [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift],
-        key,
+        "Z",
     )
-    .expect("static Moonlight chord is valid");
-
-    RemoteCommand::SendShortcut {
-        chord,
-        window: WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()),
-    }
+    .expect("static Moonlight chord is valid")
 }
 
-fn moonlight_close_command() -> RemoteCommand {
-    RemoteCommand::CloseWindow {
-        window: WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()),
+fn capture_toggle_command(window: WindowSelector) -> RemoteCommand {
+    RemoteCommand::SendShortcut {
+        chord: capture_toggle_chord(),
+        window,
     }
 }
 
@@ -111,24 +109,14 @@ impl HyprlandCommandExecutor {
         self.eval_batch(vec![focus_dispatcher(window)]).await
     }
 
-    pub async fn focus_stream(&self) -> PortResult<()> {
-        let window = WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned());
-        let chord = KeyChord::new(
-            [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift],
-            "Z",
-        )
-        .expect("static Moonlight chord is valid");
-        let lua = timed_shortcut_lua(&chord, &window, None);
-
-        self.run_hyprland(CommandSpec::new("hyprctl", ["eval".to_owned(), lua]))
-            .await
-            .map(|_| ())
+    pub async fn focus_stream(&self, window: &WindowSelector) -> PortResult<()> {
+        self.focus_window(window).await
     }
 
     async fn send_shortcut(&self, chord: &KeyChord, window: &WindowSelector) -> PortResult<()> {
         let previous = match window {
             WindowSelector::ActiveWindow => None,
-            WindowSelector::Class(_) => {
+            WindowSelector::Class(_) | WindowSelector::Address(_) => {
                 let output = self
                     .run_hyprland(CommandSpec::new(
                         "hyprctl",
@@ -147,6 +135,7 @@ impl HyprlandCommandExecutor {
             target_kind = match window {
                 WindowSelector::ActiveWindow => "active",
                 WindowSelector::Class(_) => "class",
+                WindowSelector::Address(_) => "address",
             },
             restores_focus = previous.is_some(),
             "hyprland.shortcut.dispatch"
@@ -177,7 +166,8 @@ impl CommandExecutor for HyprlandCommandExecutor {
             }
             RemoteCommand::SwitchStreamDisplay { .. }
             | RemoteCommand::AttachSession { .. }
-            | RemoteCommand::DetachSession => Err(PortError::new(
+            | RemoteCommand::DetachSession
+            | RemoteCommand::RenewSession => Err(PortError::new(
                 "COMMAND_NOT_EXECUTABLE",
                 "command is not an action",
                 false,
@@ -243,7 +233,9 @@ fn timed_shortcut_lua(
 ) -> String {
     let focus = match window {
         WindowSelector::ActiveWindow => String::new(),
-        WindowSelector::Class(_) => format!("hl.dispatch({}); ", focus_dispatcher(window)),
+        WindowSelector::Class(_) | WindowSelector::Address(_) => {
+            format!("hl.dispatch({}); ", focus_dispatcher(window))
+        }
     };
 
     if chord.key() == "Z" {
@@ -317,7 +309,13 @@ impl HyprlandSessionKeybinds {
 #[async_trait]
 impl SessionKeybindInstaller for HyprlandSessionKeybinds {
     async fn install(&self, config: SessionKeybindConfig) -> PortResult<()> {
-        let spec = install_session_keybinds_spec(config.role, config.controller.as_ref());
+        config
+            .window
+            .validate()
+            .map_err(|error| PortError::new("INVALID_COMMAND", error.to_string(), false))?;
+
+        let spec =
+            install_session_keybinds_spec(config.role, config.controller.as_ref(), &config.window);
 
         self.runner.run(spec).await.map(|_| ())
     }
@@ -349,17 +347,23 @@ fn command_actions(command: &RemoteCommand, held_modifiers: &[KeyModifier]) -> O
         )]),
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => None,
+    }
+}
+
+fn window_cli_argument(window: &WindowSelector) -> String {
+    match window {
+        WindowSelector::Class(class) => format!(" --window-class {class}"),
+        WindowSelector::Address(address) => format!(" --window-address {address}"),
+        WindowSelector::ActiveWindow => String::new(),
     }
 }
 
 fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> Option<String> {
     match command {
         RemoteCommand::SendShortcut { chord, window } => {
-            let window_arg = match window {
-                WindowSelector::Class(class) => format!(" --window-class {class}"),
-                WindowSelector::ActiveWindow => String::new(),
-            };
+            let window_arg = window_cli_argument(window);
 
             Some(format!(
                 "omdesky command send-shortcut {address} --port {port} --mods '{mods}' --key {key}{window_arg}",
@@ -370,10 +374,7 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
             ))
         }
         RemoteCommand::CloseWindow { window } => {
-            let window_arg = match window {
-                WindowSelector::Class(class) => format!(" --window-class {class}"),
-                WindowSelector::ActiveWindow => String::new(),
-            };
+            let window_arg = window_cli_argument(window);
 
             Some(format!(
                 "omdesky command close-window {address} --port {port}{window_arg}",
@@ -383,7 +384,8 @@ fn command_cli_invocation(command: &RemoteCommand, endpoint: &AgentEndpoint) -> 
         }
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => None,
     }
 }
 
@@ -414,7 +416,8 @@ hl.timer(function() hl.dispatch(hl.dsp.send_key_state({{ mods = \"{mods}\", key 
         }
         RemoteCommand::SwitchStreamDisplay { .. }
         | RemoteCommand::AttachSession { .. }
-        | RemoteCommand::DetachSession => return None,
+        | RemoteCommand::DetachSession
+        | RemoteCommand::RenewSession => return None,
     };
     #[cfg(debug_assertions)]
     return Some(format!(
@@ -442,17 +445,14 @@ omarchy-notification-send 'Omdesky debug' 'Could not send the remote shortcut'"
 fn install_session_keybinds_spec(
     role: SessionRole,
     controller: Option<&AgentEndpoint>,
+    window: &WindowSelector,
 ) -> CommandSpec {
     let mut lua = format!(
         "if {BINDS_GLOBAL} then for _, b in ipairs({BINDS_GLOBAL}) do b:remove() end end; \
 {BINDS_GLOBAL} = {{}}"
     );
 
-    for bind in session_keybinds() {
-        if role == SessionRole::Remote && bind.command.controller_exclusive() {
-            continue;
-        }
-
+    for bind in session_keybinds(window) {
         let action = match role {
             SessionRole::Controller => controller_action_lua(&bind),
             SessionRole::Remote => match controller {
@@ -542,6 +542,23 @@ mod tests {
         Err(PortError::new("TEST_FAILURE", message, false))
     }
 
+    fn stream_window() -> WindowSelector {
+        WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned())
+    }
+
+    fn moonlight_shortcut(key: &str) -> RemoteCommand {
+        let chord = KeyChord::new(
+            [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift],
+            key,
+        )
+        .expect("static Moonlight chord is valid");
+
+        RemoteCommand::SendShortcut {
+            chord,
+            window: stream_window(),
+        }
+    }
+
     fn controller() -> AgentEndpoint {
         AgentEndpoint {
             address: "100.64.0.7".parse().expect("valid address"),
@@ -551,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_controller_bind_dispatches_directly_without_http() {
-        let spec = install_session_keybinds_spec(SessionRole::Controller, None);
+        let spec = install_session_keybinds_spec(SessionRole::Controller, None, &stream_window());
 
         assert_eq!(spec.program, "hyprctl");
         assert!(spec.args[1].contains("SUPER + R"));
@@ -579,12 +596,17 @@ mod tests {
 
     #[test]
     fn test_close_session_bind_closes_moonlight_window() {
-        let controller_spec = install_session_keybinds_spec(SessionRole::Controller, None);
+        let controller_spec =
+            install_session_keybinds_spec(SessionRole::Controller, None, &stream_window());
         assert!(controller_spec.args[1].contains(
             "eval hl.dispatch(hl.dsp.window.close({ window = \"class:com.moonlight_stream.Moonlight\" }))"
         ));
 
-        let remote = install_session_keybinds_spec(SessionRole::Remote, Some(&controller()));
+        let remote = install_session_keybinds_spec(
+            SessionRole::Remote,
+            Some(&controller()),
+            &stream_window(),
+        );
         assert!(remote.args[1].contains("omdesky command close-window 100.64.0.7 --port 8765"));
         assert!(remote.args[1].contains("--window-class com.moonlight_stream.Moonlight"));
         assert!(remote.args[1].contains("close remote session"));
@@ -592,7 +614,11 @@ mod tests {
 
     #[test]
     fn test_remote_bind_forwards_to_controller_with_debug_only_notification() {
-        let spec = install_session_keybinds_spec(SessionRole::Remote, Some(&controller()));
+        let spec = install_session_keybinds_spec(
+            SessionRole::Remote,
+            Some(&controller()),
+            &stream_window(),
+        );
 
         assert!(spec.args[1].contains("SUPER + R"));
         assert!(spec.args[1].contains("omdesky command send-shortcut 100.64.0.7 --port 8765"));
@@ -615,6 +641,7 @@ mod tests {
             .install(SessionKeybindConfig {
                 role: SessionRole::Controller,
                 controller: None,
+                window: stream_window(),
             })
             .await
             .expect_err("installation fails");
@@ -634,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_install_clears_prior_bindings_before_registering() {
-        let spec = install_session_keybinds_spec(SessionRole::Controller, None);
+        let spec = install_session_keybinds_spec(SessionRole::Controller, None, &stream_window());
 
         let clear = spec.args[1].find(":remove()").expect("clears prior binds");
         let register = spec.args[1].find("hl.bind(").expect("registers binds");
@@ -643,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_remote_install_without_controller_registers_nothing() {
-        let spec = install_session_keybinds_spec(SessionRole::Remote, None);
+        let spec = install_session_keybinds_spec(SessionRole::Remote, None, &stream_window());
 
         assert!(!spec.args[1].contains("hl.bind"));
     }
@@ -729,25 +756,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_focus_stream_toggles_input_capture_after_focusing() {
+    async fn test_focus_stream_only_focuses_and_never_toggles_capture() {
         let runner = Arc::new(ScriptedRunner::new([]));
         let executor = HyprlandCommandExecutor::new(runner.clone());
 
         executor
-            .focus_stream()
+            .focus_stream(&WindowSelector::Address("0x55aa".to_owned()))
             .await
-            .expect("stream focuses and captures input");
+            .expect("stream focuses");
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         let lua = &calls[0].args[1];
-        let focus = lua.find("hl.dsp.focus").expect("focus action");
-        let toggle = lua
-            .find("key = \"Z\", state = \"down\"")
-            .expect("toggle action");
-        assert!(focus < toggle);
-        assert!(lua.contains("mods = \"CTRL ALT SHIFT\""));
-        assert!(lua.contains("key = \"Z\", state = \"up\""));
+        assert!(lua.contains("hl.dsp.focus({ window = \"address:0x55aa\" })"));
+        assert!(!lua.contains("send_key_state"));
+    }
+
+    #[test]
+    fn test_session_keybinds_target_the_resolved_window() {
+        let window = WindowSelector::Address("0x55aa".to_owned());
+        let spec = install_session_keybinds_spec(SessionRole::Controller, None, &window);
+
+        assert!(spec.args[1].contains("hl.dsp.focus({ window = \"address:0x55aa\" })"));
+        assert!(spec.args[1].contains("hl.dsp.window.close({ window = \"address:0x55aa\" })"));
+        assert!(!spec.args[1].contains("class:com.moonlight_stream.Moonlight"));
+
+        let remote =
+            install_session_keybinds_spec(SessionRole::Remote, Some(&controller()), &window);
+        assert!(remote.args[1].contains("--window-address 0x55aa"));
     }
 
     #[tokio::test]
