@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-application"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-platform"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "keyring",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "omdesky-protocol"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "omdesky-core",
  "serde",
