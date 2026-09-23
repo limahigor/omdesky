@@ -38,7 +38,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph},
 };
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
@@ -162,6 +167,9 @@ enum Overlay {
     Access,
 }
 
+const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
+const ERROR_LIFETIME: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageKind {
     Notice,
@@ -252,6 +260,14 @@ struct AppState {
     detail_expanded: bool,
     detail_overflow: bool,
     detail_rect: Option<Rect>,
+    message_shown: Option<ShownMessage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShownMessage {
+    kind: MessageKind,
+    text: String,
+    since: Instant,
 }
 
 impl AppState {
@@ -277,6 +293,46 @@ impl AppState {
             detail_expanded: false,
             detail_overflow: false,
             detail_rect: None,
+            message_shown: None,
+        }
+    }
+
+    fn expire_message(&mut self, now: Instant) {
+        let Some((kind, text)) = self.message().map(|(kind, text)| (kind, text.to_owned())) else {
+            self.message_shown = None;
+            return;
+        };
+
+        let operation_pending = self.activity != Activity::Idle || self.pending_node.is_some();
+
+        let unchanged = self
+            .message_shown
+            .as_ref()
+            .is_some_and(|shown| shown.kind == kind && shown.text == text);
+
+        if operation_pending || !unchanged {
+            self.message_shown = Some(ShownMessage {
+                kind,
+                text,
+                since: now,
+            });
+            return;
+        }
+
+        let lifetime = match kind {
+            MessageKind::Notice => NOTICE_LIFETIME,
+            MessageKind::Error => ERROR_LIFETIME,
+        };
+
+        let expired = self
+            .message_shown
+            .as_ref()
+            .is_some_and(|shown| now.duration_since(shown.since) >= lifetime);
+
+        if expired {
+            self.error = None;
+            self.notice = None;
+            self.message_shown = None;
         }
     }
 
@@ -829,6 +885,8 @@ async fn run_loop(
         {
             start_preflight(state, &services, node, sender.clone());
         }
+
+        state.expire_message(Instant::now());
 
         terminal.draw(|frame| draw(frame, state))?;
 
@@ -2298,6 +2356,85 @@ mod tests {
 
     fn state() -> AppState {
         AppState::new(ThemeWatcher::new(PathBuf::from("/nonexistent")))
+    }
+
+    #[test]
+    fn test_a_notice_disappears_after_its_lifetime() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Stream settings saved".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + NOTICE_LIFETIME - Duration::from_millis(1));
+
+        assert!(state.notice.is_some());
+
+        state.expire_message(start + NOTICE_LIFETIME);
+
+        assert!(state.notice.is_none());
+        assert!(state.message().is_none());
+    }
+
+    #[test]
+    fn test_an_error_stays_longer_than_a_notice() {
+        let mut state = state();
+        let start = Instant::now();
+        state.error = Some("The devices could not be paired.".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + NOTICE_LIFETIME);
+
+        assert!(state.error.is_some());
+
+        state.expire_message(start + ERROR_LIFETIME);
+
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn test_an_expired_error_does_not_reveal_an_older_notice() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Connected to desk.".to_owned());
+        state.error = Some("The stream ended.".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + ERROR_LIFETIME);
+
+        assert!(state.message().is_none());
+    }
+
+    #[test]
+    fn test_a_new_message_restarts_the_lifetime() {
+        let mut state = state();
+        let start = Instant::now();
+        state.notice = Some("Stream settings saved".to_owned());
+
+        state.expire_message(start);
+
+        state.notice = Some("Display mode saved".to_owned());
+        state.expire_message(start + NOTICE_LIFETIME);
+        state.expire_message(start + NOTICE_LIFETIME + NOTICE_LIFETIME / 2);
+
+        assert_eq!(state.notice.as_deref(), Some("Display mode saved"));
+    }
+
+    #[test]
+    fn test_a_progress_message_stays_while_connecting() {
+        let mut state = state();
+        let start = Instant::now();
+        state.activity = Activity::Connecting;
+        state.notice = Some("Checking connection to desk…".to_owned());
+
+        state.expire_message(start);
+        state.expire_message(start + ERROR_LIFETIME * 3);
+
+        assert!(state.notice.is_some());
+
+        state.activity = Activity::Idle;
+        state.expire_message(start + ERROR_LIFETIME * 3 + NOTICE_LIFETIME);
+
+        assert!(state.notice.is_none());
     }
 
     #[test]
