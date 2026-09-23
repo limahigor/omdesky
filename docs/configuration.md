@@ -117,7 +117,7 @@ omdesky access allow laptop --capability read_metadata --capability focus_worksp
 
 A device granted only `read_metadata` can inspect the desktop but cannot take input ownership or approve pairing. Changes take effect within a couple of seconds; the agent does not need restarting.
 
-Entries written before capabilities existed keep every capability when the file is read.
+Entries written before capabilities existed grant nothing: they are read with an empty capability list. Run `omdesky access allow` again for each such device; `omdesky doctor` lists them.
 
 ## Sessions and leases
 
