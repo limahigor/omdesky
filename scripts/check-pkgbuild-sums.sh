@@ -16,7 +16,8 @@ sums="$(sed -n "s/^sha256sums=(\(.*\))$/\1/p" "$pkgbuild" | tr -d "'\"")"
 for sum in $sums; do
   case "$sum" in
     SKIP) err "PKGBUILD-bin uses sha256sums=('SKIP'); pin the released checksum instead" ;;
-    [0-9a-f]*) [ "${#sum}" -eq 64 ] || err "PKGBUILD-bin checksum '$sum' is not a SHA-256 digest" ;;
+    *[!0-9a-f]*) err "PKGBUILD-bin checksum '$sum' is not a lowercase SHA-256 digest" ;;
+    ?*) [ "${#sum}" -eq 64 ] || err "PKGBUILD-bin checksum '$sum' is not a SHA-256 digest" ;;
     *) err "PKGBUILD-bin checksum '$sum' is not a lowercase SHA-256 digest" ;;
   esac
 done
