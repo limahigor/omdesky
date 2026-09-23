@@ -97,7 +97,13 @@ impl SessionCoordinator {
     }
 
     pub async fn snapshot(&self) -> Option<ActiveSession> {
-        self.state.lock().await.active.clone()
+        let state = self.state.lock().await;
+
+        if lease_elapsed(&state, Instant::now()) {
+            return None;
+        }
+
+        state.active.clone()
     }
 
     pub async fn reconcile(&self) -> PortResult<()> {
@@ -228,7 +234,15 @@ impl SessionCoordinator {
             return Err(SessionError::NotFound);
         }
 
-        state.expires_at = Some(Instant::now() + self.lease);
+        let now = Instant::now();
+
+        if lease_elapsed(&state, now) {
+            tracing::warn!("session.renewal_after_expiry");
+
+            return Err(SessionError::NotFound);
+        }
+
+        state.expires_at = Some(now + self.lease);
 
         Ok(SessionGrant {
             id: active.id,
@@ -240,10 +254,7 @@ impl SessionCoordinator {
     pub async fn expire_due(&self) -> SessionOutcome {
         let mut state = self.state.lock().await;
 
-        let expired = state.active.is_some()
-            && state
-                .expires_at
-                .is_none_or(|deadline| deadline <= Instant::now());
+        let expired = state.active.is_some() && lease_elapsed(&state, Instant::now());
 
         if !expired {
             return SessionOutcome::Ignored;
@@ -285,6 +296,10 @@ impl SessionCoordinator {
         state.active = None;
         state.expires_at = None;
     }
+}
+
+fn lease_elapsed(state: &CoordinatorState, now: Instant) -> bool {
+    state.expires_at.is_none_or(|deadline| deadline <= now)
 }
 
 pub async fn run_lease_expiry(coordinator: Arc<SessionCoordinator>) {
@@ -585,6 +600,28 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(20)).await;
         assert_eq!(coordinator.expire_due().await, SessionOutcome::Ignored);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_renewal_after_the_deadline_does_not_revive_the_session() {
+        let effects = Arc::new(RecordingEffects::default());
+        let coordinator = SessionCoordinator::new(effects, Duration::from_secs(30));
+        let grant = coordinator
+            .attach("node-a", SessionRole::Remote, Some(endpoint()), window())
+            .await
+            .expect("attach");
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        assert_eq!(
+            coordinator
+                .renew("node-a", grant.claim())
+                .await
+                .expect_err("an elapsed lease cannot be renewed"),
+            SessionError::NotFound
+        );
+        assert!(coordinator.snapshot().await.is_none());
+        assert_eq!(coordinator.expire_due().await, SessionOutcome::Applied);
     }
 
     #[tokio::test]
