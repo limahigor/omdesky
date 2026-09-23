@@ -164,6 +164,15 @@ Start on the computer reporting the problem:
 omdesky doctor
 ```
 
+Each check reports `PASS`, `WARN` or `FAIL`, and the command exits with a non-zero status when any check fails:
+
+- `omarchy`, `tailscale`, `hyprland` and `sunshine` confirm the tools Omdesky drives are present and answering.
+- `sunshine_pairing` confirms the Sunshine credentials are in the desktop keyring.
+- `agent` confirms the local agent answers and runs the same release line and protocol as the command; after an upgrade it asks you to restart the service.
+- `agent_service` compares the binary the user service runs with the one you invoked, which catches a packaged agent left running next to a newer standalone install.
+- `access` warns when the allowlist is empty or holds entries from an earlier release that grant nothing.
+- `devices` lists every blocked device with the command that fixes it and the computer to run it on.
+
 ### Read the agent log
 
 The agent writes to the user journal at the `info` level:

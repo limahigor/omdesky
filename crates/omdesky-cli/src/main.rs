@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod doctor;
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use omdesky_application::{
@@ -7,7 +9,7 @@ use omdesky_application::{
     discovery::{DiscoverNodes, DiscoveredNode, blocker_message},
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
-        MeshNetwork, RemoteOmarchy, StreamHost,
+        MeshNetwork, StreamHost,
     },
     readiness::ensure_controller_ready,
     services::{ConnectNode, ConnectRequest, PairStream},
@@ -22,11 +24,10 @@ use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
     config::{Config, access_path, runtime_session_path, state_dir, sunshine_config_path},
-    hyprland::HyprlandAdapter,
     input::HyprlandSessionKeybinds,
     launcher::DesktopLauncherStore,
     moonlight::MoonlightAdapter,
-    omarchy::{OmarchyNotificationAdapter, detect_version},
+    omarchy::OmarchyNotificationAdapter,
     process::TokioCommandRunner,
     session_record::{SessionRecord, SupervisedProcess},
     sunshine::{SunshineAdapter, SunshineCredentialStore},
@@ -269,7 +270,7 @@ async fn main() -> Result<()> {
         Some(Command::Session { json }) => session(json).await,
         Some(Command::Disconnect) => disconnect().await,
         Some(Command::Access { command }) => access(command).await,
-        Some(Command::Doctor { json }) => doctor(json).await,
+        Some(Command::Doctor { json }) => doctor::run(json).await,
         Some(Command::Launcher { command }) => launcher(command).await,
         Some(Command::Setup) => setup().await,
     }
@@ -277,10 +278,6 @@ async fn main() -> Result<()> {
 
 fn agent_client() -> Arc<HttpAgentClient> {
     Arc::new(HttpAgentClient::new())
-}
-
-fn sunshine_credential_store() -> Result<SunshineCredentialStore> {
-    Ok(SunshineCredentialStore::default())
 }
 
 async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
@@ -473,7 +470,7 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
         runner,
         sunshine_config_path()?,
         omdesky_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        sunshine_credential_store()?,
+        SunshineCredentialStore::default(),
     );
 
     adapter.submit_pairing_pin(pin, name).await?;
@@ -492,7 +489,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
             anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
         })?;
     let local_agent = client.health(&controller_endpoint).await;
-    let sunshine_configured = sunshine_credential_store()?.configured().await?;
+    let sunshine_configured = SunshineCredentialStore::default().configured().await?;
     ensure_controller_ready(local_agent, sunshine_configured)?;
 
     let endpoint = resolve_endpoint(&args.target).await?;
@@ -714,69 +711,6 @@ async fn access(command: AccessCommand) -> Result<()> {
     Ok(())
 }
 
-async fn doctor(json: bool) -> Result<()> {
-    let runner = Arc::new(TokioCommandRunner);
-
-    let omarchy = detect_version(runner.as_ref()).await;
-    let tailscale = TailscaleAdapter::new(runner.clone()).local_node().await;
-    let hyprland = HyprlandAdapter::new(runner.clone()).displays().await;
-    let sunshine = SunshineAdapter::with_api(
-        runner,
-        sunshine_config_path()?,
-        omdesky_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        sunshine_credential_store()?,
-    )
-    .readiness()
-    .await;
-
-    let credential_store = sunshine_credential_store()?;
-    let credential_status = tokio::task::spawn_blocking(move || credential_store.load())
-        .await
-        .context("query desktop Secret Service")?;
-    let sunshine_pairing = match credential_status {
-        Ok(Some(_)) => {
-            json!({"status": "PASS", "message": "Sunshine admin credentials configured on this host"})
-        }
-        Ok(None) => json!({
-            "status": "WARN",
-            "message": "Sunshine admin credentials missing; run `omdesky setup` on this host to enable pairing"
-        }),
-        Err(_) => json!({
-            "status": "FAIL",
-            "message": "The desktop Secret Service is unavailable or locked"
-        }),
-    };
-
-    let report = json!({
-        "omarchy": check(&omarchy),
-        "tailscale": check(&tailscale),
-        "hyprland": check(&hyprland),
-        "sunshine": check(&sunshine),
-        "sunshine_pairing": sunshine_pairing
-    });
-
-    if json {
-        return print_json(report);
-    }
-
-    for (name, value) in report.as_object().expect("object") {
-        println!(
-            "{name}: {} {}",
-            value["status"].as_str().unwrap_or("FAIL"),
-            value["message"].as_str().unwrap_or("")
-        );
-    }
-
-    Ok(())
-}
-
-fn check<T, E: std::fmt::Display>(result: &Result<T, E>) -> serde_json::Value {
-    match result {
-        Ok(_) => json!({"status": "PASS", "message": "available"}),
-        Err(error) => json!({"status": "FAIL", "message": error.to_string()}),
-    }
-}
-
 async fn launcher(command: LauncherCommand) -> Result<()> {
     let home = env::var_os("HOME").context("HOME is not set")?;
     let store = DesktopLauncherStore::new(PathBuf::from(home).join(".local/share/applications"));
@@ -817,11 +751,11 @@ async fn setup() -> Result<()> {
 
     provision_sunshine_credentials().await?;
 
-    doctor(false).await
+    doctor::run(false).await
 }
 
 async fn provision_sunshine_credentials() -> Result<()> {
-    let store = sunshine_credential_store()?;
+    let store = SunshineCredentialStore::default();
     let lookup = store.clone();
 
     if tokio::task::spawn_blocking(move || lookup.load())

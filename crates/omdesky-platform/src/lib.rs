@@ -14,5 +14,6 @@ pub mod process;
 pub mod session_record;
 pub mod state;
 pub mod sunshine;
+pub mod systemd;
 pub mod tailscale;
 pub mod theme;
