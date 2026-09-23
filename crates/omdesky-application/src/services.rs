@@ -211,7 +211,7 @@ impl DiscoverNodes {
                 let latency_ms = measured_latency_ms(probe_started.elapsed(), is_local);
                 let info = self.agent.node_info(&endpoint).await;
 
-                let status = access_status(&info, allowlist, &peer.tailnet_node_id, is_local);
+                let status = peer_status(&info, allowlist, &peer.tailnet_node_id, is_local);
 
                 let info = info.ok();
 
@@ -837,7 +837,7 @@ fn measured_latency_ms(elapsed: std::time::Duration, is_local: bool) -> u32 {
         .max(1)
 }
 
-fn access_status<T>(
+fn peer_status<T>(
     info: &PortResult<T>,
     allowlist: &[AllowedController],
     tailnet_node_id: &str,
@@ -845,6 +845,14 @@ fn access_status<T>(
 ) -> NodeStatus {
     if is_local {
         return NodeStatus::Ready;
+    }
+
+    if let Err(PortError {
+        code: "VERSION_INCOMPATIBLE",
+        ..
+    }) = info
+    {
+        return NodeStatus::Incompatible;
     }
 
     if let Err(PortError {
@@ -987,14 +995,14 @@ mod tests {
     }
 
     #[test]
-    fn test_access_status_reports_a_device_that_refuses_this_computer() {
+    fn test_peer_status_reports_a_device_that_refuses_this_computer() {
         let allowlist = vec![allowed("nREMOTE", &ControlCapability::ALL)];
 
         for code in ["UNAUTHORIZED", "CAPABILITY_DENIED"] {
             let info: PortResult<()> = Err(PortError::new(code, "refused", false));
 
             assert_eq!(
-                access_status(&info, &allowlist, "nREMOTE", false),
+                peer_status(&info, &allowlist, "nREMOTE", false),
                 NodeStatus::Denied,
                 "{code}"
             );
@@ -1002,31 +1010,42 @@ mod tests {
     }
 
     #[test]
-    fn test_access_status_reports_a_device_this_computer_does_not_list() {
+    fn test_peer_status_reports_a_device_this_computer_does_not_list() {
         let info: PortResult<()> = Ok(());
 
         assert_eq!(
-            access_status(&info, &[], "nREMOTE", false),
+            peer_status(&info, &[], "nREMOTE", false),
             NodeStatus::NeedsAccess
         );
     }
 
     #[test]
-    fn test_access_status_accepts_a_device_allowed_in_both_directions() {
+    fn test_peer_status_accepts_a_device_allowed_in_both_directions() {
         let allowlist = vec![allowed("nREMOTE", &ControlCapability::CALLBACK)];
         let info: PortResult<()> = Ok(());
 
         assert_eq!(
-            access_status(&info, &allowlist, "nREMOTE", false),
+            peer_status(&info, &allowlist, "nREMOTE", false),
             NodeStatus::Ready
         );
     }
 
     #[test]
-    fn test_access_status_keeps_this_computer_ready() {
+    fn test_peer_status_reports_a_device_whose_metadata_is_from_another_release() {
+        let allowlist = vec![allowed("nREMOTE", &ControlCapability::ALL)];
+        let info: PortResult<()> = Err(PortError::new("VERSION_INCOMPATIBLE", "0.1.1", false));
+
+        assert_eq!(
+            peer_status(&info, &allowlist, "nREMOTE", false),
+            NodeStatus::Incompatible
+        );
+    }
+
+    #[test]
+    fn test_peer_status_keeps_this_computer_ready() {
         let info: PortResult<()> = Err(PortError::new("UNAUTHORIZED", "refused", false));
 
-        assert_eq!(access_status(&info, &[], "nSELF", true), NodeStatus::Ready);
+        assert_eq!(peer_status(&info, &[], "nSELF", true), NodeStatus::Ready);
     }
 
     #[test]
