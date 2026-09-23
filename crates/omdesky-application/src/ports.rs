@@ -91,6 +91,18 @@ impl PortError {
             "LOCAL_AGENT_INCOMPATIBLE" => {
                 "The local Omdesky agent runs a different release. Restart omdesky-agent after upgrading."
             }
+            "CAPABILITY_DENIED" => {
+                "The other device does not allow this action. Grant it there with `omdesky access allow`."
+            }
+            "CALLBACK_ACCESS_MISSING" => {
+                "This computer does not let the other device send shortcuts back. Run `omdesky access allow` here, naming the other device."
+            }
+            "CONTROLLER_UNREACHABLE" => {
+                "The other device could not reach this computer's agent. Check that omdesky-agent is running here."
+            }
+            "PEER_IDENTITY_UNKNOWN" => {
+                "The other device could not be identified through Tailscale."
+            }
             "LOCAL_SUNSHINE_UNCONFIGURED" => {
                 "Sunshine is not configured on this device. Run `omdesky setup` and try again."
             }
@@ -346,6 +358,10 @@ pub trait MeshNetwork: Send + Sync {
 pub trait AgentClient: Send + Sync {
     async fn health(&self, endpoint: &AgentEndpoint) -> PortResult<HealthResponse>;
     async fn node_info(&self, endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse>;
+    async fn granted_capabilities(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<Vec<ControlCapability>>;
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>>;
     async fn workspaces(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Workspace>>;
     async fn windows(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Window>>;

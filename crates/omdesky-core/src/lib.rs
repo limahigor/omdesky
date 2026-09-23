@@ -84,6 +84,8 @@ pub enum NodeStatus {
     Offline,
     AgentUnknown,
     Incompatible,
+    Denied,
+    NeedsAccess,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -523,6 +525,8 @@ impl ControlCapability {
         Self::CloseStream,
         Self::ApprovePairing,
     ];
+
+    pub const CALLBACK: [Self; 2] = [Self::SendShortcut, Self::CloseStream];
 
     pub fn as_str(self) -> &'static str {
         match self {

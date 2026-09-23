@@ -164,7 +164,9 @@ impl CommandExecutor for RecordingCommands {
     }
 }
 
-struct UnusedAgentClient;
+struct UnusedAgentClient {
+    controller_grants: Option<Vec<ControlCapability>>,
+}
 
 #[async_trait]
 impl AgentClient for UnusedAgentClient {
@@ -174,6 +176,15 @@ impl AgentClient for UnusedAgentClient {
 
     async fn node_info(&self, _endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse> {
         Err(PortError::new("UNUSED", "unused", false))
+    }
+
+    async fn granted_capabilities(
+        &self,
+        _endpoint: &AgentEndpoint,
+    ) -> PortResult<Vec<ControlCapability>> {
+        self.controller_grants
+            .clone()
+            .ok_or_else(|| PortError::new("UNAUTHORIZED", "not listed", false))
     }
 
     async fn displays(&self, _endpoint: &AgentEndpoint) -> PortResult<Vec<Display>> {
@@ -266,6 +277,13 @@ impl SessionEffects for CountingEffects {
 }
 
 fn state(entries: Vec<AllowedController>) -> AgentState {
+    state_with_controller_grants(entries, Some(ControlCapability::ALL.to_vec()))
+}
+
+fn state_with_controller_grants(
+    entries: Vec<AllowedController>,
+    controller_grants: Option<Vec<ControlCapability>>,
+) -> AgentState {
     AgentState {
         node: NodeInfoResponse {
             node_id: "local".to_owned(),
@@ -278,7 +296,7 @@ fn state(entries: Vec<AllowedController>) -> AgentState {
         desktop: Arc::new(EmptyDesktop),
         sunshine: Arc::new(UnusedStreamHost),
         commands: Arc::new(RecordingCommands::default()),
-        agent_client: Arc::new(UnusedAgentClient),
+        agent_client: Arc::new(UnusedAgentClient { controller_grants }),
         notifications: Arc::new(SilentNotifications),
         authorizer: Arc::new(Authorizer::new(
             Arc::new(StaticMesh),
@@ -477,6 +495,80 @@ async fn test_every_response_advertises_the_agent_release() {
     assert_eq!(refused_release.as_deref(), Some(RELEASE));
     assert_eq!(unauthorized, StatusCode::UNAUTHORIZED);
     assert_eq!(unauthorized_release.as_deref(), Some(RELEASE));
+}
+
+fn remote_attach(source: SocketAddr) -> Request<Body> {
+    post_json(
+        "/v1/commands",
+        &CommandRequest::new(RemoteCommand::AttachSession {
+            role: SessionRole::Remote,
+            window: Some(WindowSelector::Address("0x55aa".to_owned())),
+            controller: Some(SessionEndpoint {
+                address: source.ip(),
+                port: 48155,
+            }),
+        }),
+    )
+}
+
+#[tokio::test]
+async fn test_a_remote_session_is_refused_when_the_controller_does_not_list_this_device() {
+    let state = state_with_controller_grants(vec![entry(PEER, &ControlCapability::ALL)], None);
+
+    let (status, body) = call(&state, peer_source(), remote_attach(peer_source())).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        decode::<ErrorEnvelope>(&body).error.code,
+        "CALLBACK_ACCESS_MISSING"
+    );
+    assert!(state.sessions.snapshot().await.is_none());
+}
+
+#[tokio::test]
+async fn test_a_remote_session_is_refused_when_the_controller_withholds_a_callback_capability() {
+    for granted in ControlCapability::CALLBACK {
+        let grants = ControlCapability::ALL
+            .into_iter()
+            .filter(|capability| *capability != granted)
+            .collect();
+
+        let state =
+            state_with_controller_grants(vec![entry(PEER, &ControlCapability::ALL)], Some(grants));
+
+        let (status, _) = call(&state, peer_source(), remote_attach(peer_source())).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "{granted} is required");
+        assert!(state.sessions.snapshot().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_a_remote_session_starts_when_the_controller_grants_the_callbacks() {
+    let state = state_with_controller_grants(
+        vec![entry(PEER, &ControlCapability::ALL)],
+        Some(ControlCapability::CALLBACK.to_vec()),
+    );
+
+    let (status, _) = call(&state, peer_source(), remote_attach(peer_source())).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.sessions.snapshot().await.is_some());
+}
+
+#[tokio::test]
+async fn test_a_listed_peer_reads_its_own_grants_without_read_metadata() {
+    let state = state(vec![entry(PEER, &ControlCapability::CALLBACK)]);
+
+    let (status, body) = call(&state, peer_source(), get("/v1/capabilities")).await;
+    let (unlisted, _) = call(&state, other_source(), get("/v1/capabilities")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        decode::<omdesky_protocol::CapabilitiesResponse>(&body).capabilities,
+        ControlCapability::CALLBACK.to_vec()
+    );
+    assert_eq!(unlisted, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

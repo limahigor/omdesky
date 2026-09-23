@@ -70,6 +70,8 @@ The agent listens on the local Tailscale address rather than a public network in
 
 The health check is available to any device that can reach the port. Every other request must resolve to a Tailscale device identity **and** appear in the local Omdesky allowlist with the capability that request needs. A missing or empty allowlist accepts nobody.
 
+A session needs both directions. Before pairing or streaming, the controller confirms that its own allowlist grants the other computer `send_shortcut` and `close_stream`, the capabilities used to send shortcuts, display switches and stream closes back. When the controlled computer receives the session request it asks the controller's `/v1/capabilities` which grants it holds, and refuses the session if either is missing or the controller cannot be reached.
+
 Both computers must run the same release line: the same major and minor version, with any patch version. Every request carries the sender's release in an `omdesky-release` header and every response carries the agent's, and either side refuses the other when the lines differ or the header is missing. The health check stays open to every release so a controller can report a device as incompatible instead of hiding it.
 
 See [Configuration and access control](configuration.md) for setup instructions.

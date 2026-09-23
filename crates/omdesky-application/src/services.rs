@@ -1,13 +1,14 @@
 use crate::ports::{
-    AgentClient, AgentEndpoint, ChildProcess, MeshNetwork, Notification, NotificationService,
-    PairingState, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
-    StreamClient, StreamHostDescriptor, StreamLaunchRequest, StreamWindowLocator,
+    AccessStore, AgentClient, AgentEndpoint, AllowedController, ChildProcess, MeshNetwork,
+    Notification, NotificationService, PairingState, PortError, PortResult, SessionKeybindConfig,
+    SessionKeybindInstaller, StreamClient, StreamHostDescriptor, StreamLaunchRequest,
+    StreamWindowLocator,
 };
 use futures::{StreamExt, stream};
 use omdesky_core::{
-    ConnectionKind, InputMode, MeshPeer, NodeCapabilities, NodeStatus, RemoteCommand,
-    SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile, WindowSelector,
-    WorkspaceTarget,
+    ConnectionKind, ControlCapability, InputMode, MeshPeer, NodeCapabilities, NodeStatus,
+    RemoteCommand, SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile,
+    WindowSelector, WorkspaceTarget,
 };
 use omdesky_protocol::{CommandRequest, PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
@@ -35,14 +36,81 @@ pub struct DiscoveredNode {
 pub struct DiscoverNodes {
     mesh: Arc<dyn MeshNetwork>,
     agent: Arc<dyn AgentClient>,
+    access: Arc<dyn AccessStore>,
     agent_port: u16,
 }
 
+pub fn missing_callback_capabilities(
+    allowlist: &[AllowedController],
+    tailnet_node_id: &str,
+) -> Vec<ControlCapability> {
+    let entry = allowlist
+        .iter()
+        .find(|entry| entry.tailnet_node_id == tailnet_node_id);
+
+    ControlCapability::CALLBACK
+        .into_iter()
+        .filter(|capability| !entry.is_some_and(|entry| entry.allows(*capability)))
+        .collect()
+}
+
+pub fn callback_access_error(missing: &[ControlCapability]) -> PortError {
+    let missing = missing
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    PortError::new(
+        "CALLBACK_ACCESS_MISSING",
+        format!("the controller does not grant {missing} to the remote device"),
+        false,
+    )
+}
+
+#[derive(Clone)]
+pub struct CallbackAccess {
+    mesh: Arc<dyn MeshNetwork>,
+    access: Arc<dyn AccessStore>,
+}
+
+impl CallbackAccess {
+    pub fn new(mesh: Arc<dyn MeshNetwork>, access: Arc<dyn AccessStore>) -> Self {
+        Self { mesh, access }
+    }
+
+    pub async fn verify(&self, address: IpAddr) -> PortResult<()> {
+        let identity = self.mesh.identify_source(address).await?.ok_or_else(|| {
+            PortError::new(
+                "PEER_IDENTITY_UNKNOWN",
+                "Tailscale does not know the remote address",
+                false,
+            )
+        })?;
+
+        let allowlist = self.access.list().await?;
+
+        let missing = missing_callback_capabilities(&allowlist, &identity.tailnet_node_id);
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        Err(callback_access_error(&missing))
+    }
+}
+
 impl DiscoverNodes {
-    pub fn new(mesh: Arc<dyn MeshNetwork>, agent: Arc<dyn AgentClient>, agent_port: u16) -> Self {
+    pub fn new(
+        mesh: Arc<dyn MeshNetwork>,
+        agent: Arc<dyn AgentClient>,
+        access: Arc<dyn AccessStore>,
+        agent_port: u16,
+    ) -> Self {
         Self {
             mesh,
             agent,
+            access,
             agent_port,
         }
     }
@@ -59,6 +127,12 @@ impl DiscoverNodes {
             ));
         }
 
+        let allowlist = self.access.list().await.unwrap_or_else(|error| {
+            tracing::debug!(code = error.code, "discovery.allowlist_unavailable");
+
+            Vec::new()
+        });
+
         let mut nodes = Vec::new();
 
         let local_peer = MeshPeer {
@@ -71,14 +145,17 @@ impl DiscoverNodes {
             latency_ms: Some(0),
         };
 
-        if let Some(node) = self.probe(local_peer, include_all_tailnet, true).await {
+        if let Some(node) = self
+            .probe(local_peer, include_all_tailnet, true, &allowlist)
+            .await
+        {
             nodes.push(node);
         }
 
         let probes = stream::iter(
             peers
                 .into_iter()
-                .map(|peer| self.probe(peer, include_all_tailnet, false)),
+                .map(|peer| self.probe(peer, include_all_tailnet, false, &allowlist)),
         )
         .buffer_unordered(DISCOVERY_CONCURRENCY);
 
@@ -104,6 +181,7 @@ impl DiscoverNodes {
         peer: MeshPeer,
         include_all: bool,
         is_local: bool,
+        allowlist: &[AllowedController],
     ) -> Option<DiscoveredNode> {
         let address = peer
             .ips
@@ -131,12 +209,17 @@ impl DiscoverNodes {
         match self.agent.health(&endpoint).await {
             Ok(health) if health.protocol == PROTOCOL_V1 => {
                 let latency_ms = measured_latency_ms(probe_started.elapsed(), is_local);
-                let info = self.agent.node_info(&endpoint).await.ok();
+                let info = self.agent.node_info(&endpoint).await;
+
+                let status = access_status(&info, allowlist, &peer.tailnet_node_id, is_local);
+
+                let info = info.ok();
+
                 Some(DiscoveredNode {
                     tailnet_node_id: peer.tailnet_node_id,
                     name,
                     address,
-                    status: NodeStatus::Ready,
+                    status,
                     connection: peer.connection,
                     latency_ms: Some(latency_ms),
                     agent_version: info.as_ref().map(|value| value.agent_version.clone()),
@@ -262,6 +345,7 @@ pub const STREAM_WINDOW_LOOKUP_INTERVAL: std::time::Duration =
 
 pub struct ConnectNode {
     agent: Arc<dyn AgentClient>,
+    callback_access: CallbackAccess,
     stream: Arc<dyn StreamClient>,
     keybinds: Arc<dyn SessionKeybindInstaller>,
     notifications: Arc<dyn NotificationService>,
@@ -272,6 +356,7 @@ pub struct ConnectNode {
 impl ConnectNode {
     pub fn new(
         agent: Arc<dyn AgentClient>,
+        callback_access: CallbackAccess,
         stream: Arc<dyn StreamClient>,
         keybinds: Arc<dyn SessionKeybindInstaller>,
         notifications: Arc<dyn NotificationService>,
@@ -280,6 +365,7 @@ impl ConnectNode {
         let pairing = PairStream::new(agent.clone(), stream.clone(), client_name);
         Self {
             agent,
+            callback_access,
             stream,
             keybinds,
             notifications,
@@ -344,6 +430,10 @@ impl ConnectNode {
         F: FnOnce(Option<u32>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        self.callback_access
+            .verify(request.endpoint.address)
+            .await?;
+
         let status = self.agent.sunshine_status(&request.endpoint).await?;
 
         if !status.ready {
@@ -432,8 +522,10 @@ impl ConnectNode {
                         .notifications
                         .send(Notification {
                             summary: "Omdesky".to_owned(),
-                            body: "The stream started, but remote shortcuts are unavailable."
-                                .to_owned(),
+                            body: format!(
+                                "The stream started, but remote shortcuts are unavailable. {}",
+                                error.user_message()
+                            ),
                         })
                         .await;
                 }
@@ -745,6 +837,31 @@ fn measured_latency_ms(elapsed: std::time::Duration, is_local: bool) -> u32 {
         .max(1)
 }
 
+fn access_status<T>(
+    info: &PortResult<T>,
+    allowlist: &[AllowedController],
+    tailnet_node_id: &str,
+    is_local: bool,
+) -> NodeStatus {
+    if is_local {
+        return NodeStatus::Ready;
+    }
+
+    if let Err(PortError {
+        code: "UNAUTHORIZED" | "CAPABILITY_DENIED",
+        ..
+    }) = info
+    {
+        return NodeStatus::Denied;
+    }
+
+    if !missing_callback_capabilities(allowlist, tailnet_node_id).is_empty() {
+        return NodeStatus::NeedsAccess;
+    }
+
+    NodeStatus::Ready
+}
+
 fn generic_node(
     peer: MeshPeer,
     name: String,
@@ -831,6 +948,85 @@ mod tests {
     #[test]
     fn test_agent_health_failure_tolerates_one_transient_failure() {
         assert!(agent_health_failure(1, 1, 2).is_none());
+    }
+
+    fn allowed(id: &str, capabilities: &[ControlCapability]) -> AllowedController {
+        AllowedController::new(
+            id,
+            None,
+            time::OffsetDateTime::UNIX_EPOCH,
+            capabilities.iter().copied(),
+        )
+    }
+
+    #[test]
+    fn test_missing_callback_capabilities_reports_an_unlisted_device() {
+        let allowlist = vec![allowed("nOTHER", &ControlCapability::ALL)];
+
+        assert_eq!(
+            missing_callback_capabilities(&allowlist, "nREMOTE"),
+            ControlCapability::CALLBACK.to_vec()
+        );
+    }
+
+    #[test]
+    fn test_missing_callback_capabilities_reports_each_withheld_capability() {
+        let allowlist = vec![allowed("nREMOTE", &[ControlCapability::SendShortcut])];
+
+        assert_eq!(
+            missing_callback_capabilities(&allowlist, "nREMOTE"),
+            vec![ControlCapability::CloseStream]
+        );
+    }
+
+    #[test]
+    fn test_missing_callback_capabilities_accepts_a_device_with_the_callbacks() {
+        let allowlist = vec![allowed("nREMOTE", &ControlCapability::CALLBACK)];
+
+        assert!(missing_callback_capabilities(&allowlist, "nREMOTE").is_empty());
+    }
+
+    #[test]
+    fn test_access_status_reports_a_device_that_refuses_this_computer() {
+        let allowlist = vec![allowed("nREMOTE", &ControlCapability::ALL)];
+
+        for code in ["UNAUTHORIZED", "CAPABILITY_DENIED"] {
+            let info: PortResult<()> = Err(PortError::new(code, "refused", false));
+
+            assert_eq!(
+                access_status(&info, &allowlist, "nREMOTE", false),
+                NodeStatus::Denied,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_access_status_reports_a_device_this_computer_does_not_list() {
+        let info: PortResult<()> = Ok(());
+
+        assert_eq!(
+            access_status(&info, &[], "nREMOTE", false),
+            NodeStatus::NeedsAccess
+        );
+    }
+
+    #[test]
+    fn test_access_status_accepts_a_device_allowed_in_both_directions() {
+        let allowlist = vec![allowed("nREMOTE", &ControlCapability::CALLBACK)];
+        let info: PortResult<()> = Ok(());
+
+        assert_eq!(
+            access_status(&info, &allowlist, "nREMOTE", false),
+            NodeStatus::Ready
+        );
+    }
+
+    #[test]
+    fn test_access_status_keeps_this_computer_ready() {
+        let info: PortResult<()> = Err(PortError::new("UNAUTHORIZED", "refused", false));
+
+        assert_eq!(access_status(&info, &[], "nSELF", true), NodeStatus::Ready);
     }
 
     #[test]

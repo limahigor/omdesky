@@ -142,7 +142,7 @@ omdesky access list
 omdesky access revoke controller-hostname
 ```
 
-Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other.
+Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other. Omdesky checks both entries before it pairs or starts a stream and refuses the connection if either is missing; `omdesky devices` shows `Denied` when the other computer does not list this one and `NeedsAccess` when this computer does not list the other.
 
 Narrow a grant with `--capability` when a device should do less than everything:
 

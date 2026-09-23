@@ -90,6 +90,21 @@ impl Authorizer {
         source: IpAddr,
         required: ControlCapability,
     ) -> Result<AuthorizedPeer, AuthorizationError> {
+        let peer = self.authenticate(source).await?;
+
+        if !peer.capabilities.contains(&required) {
+            tracing::warn!(
+                capability = required.as_str(),
+                "authorize.capability_denied"
+            );
+
+            return Err(AuthorizationError::Forbidden);
+        }
+
+        Ok(peer)
+    }
+
+    pub async fn authenticate(&self, source: IpAddr) -> Result<AuthorizedPeer, AuthorizationError> {
         if self.strict_tailnet_only && !is_tailscale_address(source) {
             tracing::warn!("authorize.source_outside_tailnet");
 
@@ -109,15 +124,6 @@ impl Authorizer {
             .iter()
             .find(|entry| entry.tailnet_node_id == tailnet_node_id)
             .ok_or(AuthorizationError::Unauthorized)?;
-
-        if !entry.allows(required) {
-            tracing::warn!(
-                capability = required.as_str(),
-                "authorize.capability_denied"
-            );
-
-            return Err(AuthorizationError::Forbidden);
-        }
 
         Ok(AuthorizedPeer {
             tailnet_node_id: entry.tailnet_node_id.clone(),

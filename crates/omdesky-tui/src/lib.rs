@@ -10,8 +10,8 @@ use omdesky_application::{
         PortError, StreamWindowLocator,
     },
     services::{
-        ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode, MOONLIGHT_WINDOW_CLASS,
-        ensure_controller_ready,
+        CallbackAccess, ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode,
+        MOONLIGHT_WINDOW_CLASS, ensure_controller_ready,
     },
 };
 use omdesky_core::{
@@ -66,6 +66,7 @@ struct Services {
     desktop: Arc<HyprlandCommandExecutor>,
     windows: Arc<HyprlandAdapter>,
     access: Arc<FileAccessStore>,
+    callback_access: CallbackAccess,
     sunshine_credentials: SunshineCredentialStore,
     agent_port: u16,
     client_name: String,
@@ -77,21 +78,24 @@ impl Services {
         let runner = Arc::new(TokioCommandRunner);
         let mesh = Arc::new(TailscaleAdapter::new(runner.clone()));
         let agent = Arc::new(HttpAgentClient::new());
+        let access = Arc::new(FileAccessStore::new(access_path()?));
 
         let _ = state_dir();
 
         Ok(Self {
             discovery: Arc::new(DiscoverNodes::new(
-                mesh,
+                mesh.clone(),
                 agent.clone(),
+                access.clone(),
                 config.network.agent_port,
             )),
+            callback_access: CallbackAccess::new(mesh, access.clone()),
             agent,
             stream: Arc::new(MoonlightAdapter::new(runner.clone())),
             notifications: Arc::new(OmarchyNotificationAdapter::default()),
             desktop: Arc::new(HyprlandCommandExecutor::new(runner.clone())),
             windows: Arc::new(HyprlandAdapter::new(runner)),
-            access: Arc::new(FileAccessStore::new(access_path()?)),
+            access,
             sunshine_credentials: SunshineCredentialStore::new(Some(
                 legacy_sunshine_credentials_path()?,
             )),
@@ -103,6 +107,7 @@ impl Services {
     fn connect_service(&self) -> ConnectNode {
         ConnectNode::new(
             self.agent.clone(),
+            self.callback_access.clone(),
             self.stream.clone(),
             Arc::new(HyprlandSessionKeybinds::new(Arc::new(TokioCommandRunner))),
             self.notifications.clone(),
@@ -305,12 +310,23 @@ impl AppState {
         }
 
         let node = self.selected()?;
+
         if node.is_local {
-            Some("This device cannot connect to itself")
-        } else if node.status != NodeStatus::Ready {
-            Some("This device is not ready")
-        } else {
-            None
+            return Some("This device cannot connect to itself");
+        }
+
+        match node.status {
+            NodeStatus::Ready => None,
+            NodeStatus::Denied => Some(
+                "This device does not allow this computer. Run `omdesky access allow` on it, naming this computer.",
+            ),
+            NodeStatus::NeedsAccess => Some(
+                "This computer does not let the device send shortcuts back. Run `omdesky access allow` here, naming the device.",
+            ),
+            NodeStatus::Incompatible => Some(
+                "This device runs a different Omdesky release. Install the same version on both.",
+            ),
+            NodeStatus::Offline | NodeStatus::AgentUnknown => Some("This device is not ready"),
         }
     }
 
@@ -1743,6 +1759,7 @@ fn status_icon(node: &DiscoveredNode) -> &'static str {
             NodeStatus::Offline => "󰅖",
             NodeStatus::AgentUnknown => "󰋗",
             NodeStatus::Incompatible => "󰀦",
+            NodeStatus::Denied | NodeStatus::NeedsAccess => "󰌾",
         }
     }
 }
@@ -2048,6 +2065,8 @@ fn status_label(status: NodeStatus) -> &'static str {
         NodeStatus::Offline => "OFFLINE",
         NodeStatus::AgentUnknown => "UNKNOWN",
         NodeStatus::Incompatible => "INCOMPATIBLE",
+        NodeStatus::Denied => "DENIED",
+        NodeStatus::NeedsAccess => "NEEDS ACCESS",
     }
 }
 
@@ -2065,8 +2084,8 @@ fn status_style(node: &DiscoveredNode, theme: &OmarchyTheme) -> Style {
     } else {
         match node.status {
             NodeStatus::Ready => theme.success,
-            NodeStatus::Offline | NodeStatus::Incompatible => theme.error,
-            NodeStatus::AgentUnknown => theme.warning,
+            NodeStatus::Offline | NodeStatus::Incompatible | NodeStatus::Denied => theme.error,
+            NodeStatus::AgentUnknown | NodeStatus::NeedsAccess => theme.warning,
         }
     };
 

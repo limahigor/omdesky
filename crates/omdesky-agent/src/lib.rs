@@ -215,7 +215,11 @@ async fn capabilities(
     State(state): State<AgentState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
 ) -> Result<Json<CapabilitiesResponse>, ApiError> {
-    let peer = authorize(&state, source, ControlCapability::ReadMetadata).await?;
+    let peer = state
+        .authorizer
+        .authenticate(source.ip())
+        .await
+        .map_err(authorization_error)?;
 
     Ok(Json(CapabilitiesResponse {
         capabilities: peer.capabilities,
@@ -455,6 +459,10 @@ async fn apply_session_command(
             let window =
                 window.unwrap_or_else(|| WindowSelector::Class(MOONLIGHT_WINDOW_CLASS.to_owned()));
 
+            if let Some(controller) = &controller {
+                verify_callback_access(state, controller).await?;
+            }
+
             let grant = state
                 .sessions
                 .attach(&peer.tailnet_node_id, role, controller, window)
@@ -496,6 +504,59 @@ async fn apply_session_command(
         }
         _ => Ok(CommandResponse::ignored()),
     }
+}
+
+async fn verify_callback_access(
+    state: &AgentState,
+    controller: &AgentEndpoint,
+) -> Result<(), ApiError> {
+    let granted = match state.agent_client.granted_capabilities(controller).await {
+        Ok(granted) => granted,
+        Err(error) => return Err(callback_probe_error(error)),
+    };
+
+    let missing = ControlCapability::CALLBACK
+        .into_iter()
+        .filter(|capability| !granted.contains(capability))
+        .map(ControlCapability::as_str)
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    tracing::warn!(missing = %missing.join(","), "session.callback_access_missing");
+
+    Err(callback_access_missing())
+}
+
+fn callback_probe_error(error: omdesky_application::ports::PortError) -> ApiError {
+    tracing::warn!(code = error.code, "session.callback_probe_failed");
+
+    match error.code {
+        "UNAUTHORIZED" | "CAPABILITY_DENIED" => callback_access_missing(),
+        "VERSION_INCOMPATIBLE" => ApiError::new(
+            StatusCode::CONFLICT,
+            "VERSION_INCOMPATIBLE",
+            "The controller runs a different Omdesky release.",
+            false,
+        ),
+        _ => ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "CONTROLLER_UNREACHABLE",
+            "This device could not reach the controller's agent.",
+            true,
+        ),
+    }
+}
+
+fn callback_access_missing() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "CALLBACK_ACCESS_MISSING",
+        "The controller does not allow this device to send shortcuts back.",
+        false,
+    )
 }
 
 fn callback_endpoint(

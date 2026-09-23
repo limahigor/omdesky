@@ -7,7 +7,10 @@ use omdesky_application::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
         MeshNetwork, StreamHost,
     },
-    services::{ConnectNode, ConnectRequest, DiscoverNodes, PairStream, ensure_controller_ready},
+    services::{
+        CallbackAccess, ConnectNode, ConnectRequest, DiscoverNodes, PairStream,
+        ensure_controller_ready,
+    },
 };
 use omdesky_core::{
     CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, NodeId,
@@ -308,6 +311,7 @@ async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
     let discovery = DiscoverNodes::new(
         Arc::new(TailscaleAdapter::new(runner)),
         agent_client(),
+        Arc::new(FileAccessStore::new(access_path()?)),
         config.network.agent_port,
     );
     let nodes = discovery.execute(all_tailnet).await?;
@@ -488,8 +492,13 @@ async fn connect(args: ConnectArgs) -> Result<()> {
 
     let endpoint = resolve_endpoint(&args.target).await?;
     let notifications = Arc::new(OmarchyNotificationAdapter::default());
+    let callback_access = CallbackAccess::new(
+        Arc::new(TailscaleAdapter::new(Arc::new(TokioCommandRunner))),
+        Arc::new(FileAccessStore::new(access_path()?)),
+    );
     let service = ConnectNode::new(
         client,
+        callback_access,
         moonlight_adapter(),
         Arc::new(HyprlandSessionKeybinds::new(Arc::new(TokioCommandRunner))),
         notifications,

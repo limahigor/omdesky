@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{AgentClient, AgentEndpoint, PortError, PortResult};
 use omdesky_core::{
-    Display, Window, Workspace, WorkspaceTarget,
+    ControlCapability, Display, Window, Workspace, WorkspaceTarget,
     text::{DISPLAY_LINE_LIMIT, DISPLAY_NAME_LIMIT, sanitize_for_display, sanitize_optional},
 };
 use omdesky_protocol::{
@@ -11,7 +11,7 @@ use omdesky_protocol::{
     WorkspacesResponse, is_compatible_release,
 };
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -146,6 +146,17 @@ impl AgentClient for HttpAgentClient {
         validate_node_info(response)
     }
 
+    async fn granted_capabilities(
+        &self,
+        endpoint: &AgentEndpoint,
+    ) -> PortResult<Vec<ControlCapability>> {
+        let response: GrantedCapabilities = self
+            .get(endpoint, "/v1/capabilities", REQUEST_TIMEOUT)
+            .await?;
+
+        Ok(known_capabilities(response.capabilities))
+    }
+
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>> {
         let response: DisplaysResponse =
             self.get(endpoint, "/v1/displays", REQUEST_TIMEOUT).await?;
@@ -248,6 +259,19 @@ impl AgentClient for HttpAgentClient {
     ) -> PortResult<CommandResponse> {
         self.post_json(endpoint, "/v1/commands", &request).await
     }
+}
+
+#[derive(Deserialize)]
+struct GrantedCapabilities {
+    capabilities: Vec<String>,
+}
+
+fn known_capabilities(capabilities: Vec<String>) -> Vec<ControlCapability> {
+    capabilities
+        .iter()
+        .take(MAX_CAPABILITIES)
+        .filter_map(|capability| capability.parse().ok())
+        .collect()
 }
 
 fn sanitize_display(display: Display) -> Display {
@@ -377,6 +401,9 @@ fn http_error(status: StatusCode, envelope: Option<ErrorEnvelope>) -> PortError 
                 "SUNSHINE_PAIRING_FAILED" => "SUNSHINE_PAIRING_FAILED",
                 "INVALID_COMMAND" => "INVALID_COMMAND",
                 "VERSION_INCOMPATIBLE" => "VERSION_INCOMPATIBLE",
+                "CAPABILITY_DENIED" => "CAPABILITY_DENIED",
+                "CALLBACK_ACCESS_MISSING" => "CALLBACK_ACCESS_MISSING",
+                "CONTROLLER_UNREACHABLE" => "CONTROLLER_UNREACHABLE",
                 _ => "AGENT_REQUEST_FAILED",
             };
 
@@ -546,6 +573,24 @@ mod tests {
         server.await.expect("server exits");
 
         assert_eq!(error.code, "VERSION_INCOMPATIBLE");
+    }
+
+    #[tokio::test]
+    async fn test_granted_capabilities_ignore_unknown_values() {
+        let body = serde_json::json!({
+            "capabilities": ["send_shortcut", "future_capability", "close_stream"],
+        })
+        .to_string();
+        let (endpoint, server) = serve_once(Some(RELEASE.to_owned()), body).await;
+
+        let granted = HttpAgentClient::new()
+            .granted_capabilities(&endpoint)
+            .await
+            .expect("grants are readable");
+        let request = server.await.expect("server exits");
+
+        assert!(request.starts_with("GET /v1/capabilities "));
+        assert_eq!(granted, ControlCapability::CALLBACK.to_vec());
     }
 
     #[tokio::test]
