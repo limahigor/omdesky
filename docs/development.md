@@ -134,10 +134,10 @@ Add `--json` when comparing output in a script or test.
 
 `packaging/arch/PKGBUILD` builds from source and installs `omdesky`, `omdesky-agent`, the user service, and the license. It expects the repository contents to be available in the package build directory.
 
-`packaging/arch/PKGBUILD-bin` installs the published release tarball and must pin that tarball's SHA-256. After a release is published, repin it and commit the result:
+`packaging/arch/PKGBUILD-bin` installs the published release tarball and must pin that tarball's SHA-256, which exists only once the tag's release is built. The release workflow therefore pins it itself: after publishing the assets, it downloads the tarball, verifies it against the published `.sha256`, and commits `chore: pin omdesky-bin X.Y.Z checksum` to `master`, so the recommended `makepkg -p PKGBUILD-bin -si` installs the new release as soon as it appears. Merge `master` back into `dev` afterwards. To repin by hand, run:
 
 ```bash
-scripts/update-pkgbuild-sums.sh 0.1.2
+scripts/update-pkgbuild-sums.sh 0.2.0
 ```
 
 `scripts/check-pkgbuild-sums.sh` runs in CI and fails if the pin is missing or set to `SKIP`.

@@ -77,3 +77,45 @@ jobs:
             omdesky-*-x86_64-linux.tar.gz.sha256
           body_path: release-notes.md
           generate_release_notes: false
+
+  pin-package:
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write
+    concurrency:
+      group: pin-package
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: master
+      - name: Pin PKGBUILD-bin to the published tarball
+        env:
+          OMDESKY_REPO: ${{ github.repository }}
+        run: scripts/update-pkgbuild-sums.sh "${GITHUB_REF_NAME#v}"
+      - name: Commit the pin to master
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          if git diff --quiet -- packaging/arch/PKGBUILD-bin; then
+            echo "PKGBUILD-bin already pins ${version}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/arch/PKGBUILD-bin
+          git commit -m "chore: pin omdesky-bin ${version} checksum"
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master; then
+              exit 0
+            fi
+
+            git pull --rebase origin master
+          done
+
+          exit 1
