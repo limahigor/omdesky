@@ -96,7 +96,7 @@ verify_checksum() {
 # Reject archives that would write outside the extraction directory or install
 # links pointing at attacker-chosen paths.
 verify_archive_layout() {
-  local archive="$1" prefix="$2" entry
+  local archive="$1" prefix="$2" entry listing
 
   tar -tzf "$archive" >/dev/null 2>&1 || err "the downloaded archive is not readable"
 
@@ -108,13 +108,15 @@ verify_archive_layout() {
     esac
   done < <(tar -tzf "$archive")
 
-  if tar -tvzf "$archive" | grep -Eq '^[lh]'; then
+  listing="$(tar -tvzf "$archive")" || err "the downloaded archive is not readable"
+
+  if grep -Eq '^[lh]' <<<"$listing"; then
     err "the archive contains symbolic or hard links"
   fi
 }
 
 install_from_dir() {
-  local src="$1" file
+  local src="$1" file unit_tmp
 
   for file in omdesky omdesky-agent omdesky-agent.service; do
     [ -f "$src/$file" ] || err "missing $file in $src"
@@ -134,11 +136,13 @@ install_from_dir() {
 
   info "Installing user service to $UNIT_DIR"
   mkdir -p "$UNIT_DIR"
+  unit_tmp="$(mktemp "$UNIT_DIR/.omdesky-agent.service.XXXXXX")"
   AGENT_EXEC_START="ExecStart=\"$BIN_DIR/omdesky-agent\"" awk '
     /^ExecStart=/ { print ENVIRON["AGENT_EXEC_START"]; next }
     { print }
-  ' "$src/omdesky-agent.service" > "$UNIT_DIR/omdesky-agent.service"
-  chmod 644 "$UNIT_DIR/omdesky-agent.service"
+  ' "$src/omdesky-agent.service" > "$unit_tmp" || { rm -f "$unit_tmp"; err "could not write the user service"; }
+  chmod 644 "$unit_tmp"
+  mv -f -T "$unit_tmp" "$UNIT_DIR/omdesky-agent.service"
 
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 }
