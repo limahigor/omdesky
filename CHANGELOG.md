@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Authorization is fail-closed. A missing or empty allowlist now refuses every request except the health check, instead of accepting any reachable Tailnet device.
 - Allowlist entries carry capabilities, so a device can be granted reading, focus, session control, shortcut injection, stream closing or pairing approval separately.
-- Desktop sessions have an owner, an unpredictable identifier, a generation and a lease. Only the owner can renew or end its session, a message from a superseded session is ignored, and an unrenewed lease expires and restores local input.
+- Desktop sessions have an owner, an unpredictable identifier, a generation and a lease. Only the owner can renew or end its session, a message from a superseded session is ignored, and an unrenewed lease expires and restores local input; a renewal that arrives after the deadline cannot revive it.
 - Attach and detach are serialized and roll back, so a failing `hyprctl` no longer leaves a phantom session or orphaned keybindings. The agent also reconciles at startup and releases the session on shutdown.
 - The controller callback endpoint must match the authenticated peer, which removes a blind request path into loopback and the LAN.
 - `tailscale whois` results are cached and concurrency-capped, and a per-source rate limit sheds a flood before any subprocess is created.
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Text supplied by another computer is stripped of escape, control and bidirectional characters before display.
 - `network.strict_tailnet_only` is enforced; the Tailscale address check uses the exact CGNAT and ULA ranges.
 - The Hyprland event socket must be a socket owned by this user under `XDG_RUNTIME_DIR`; the `/tmp` fallback is removed.
-- The installer verifies the release tarball's SHA-256 and rejects unsafe archive entries; the binary package pins the released checksum instead of `SKIP`.
+- The installer verifies the release tarball's SHA-256 and rejects unsafe archive entries and links, and writes the user service atomically without following an existing link; the binary package pins the released checksum instead of `SKIP`.
 - The user service sets a trusted `PATH` and a systemd sandbox profile.
 
 ### Fixed
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The session record stores the real Moonlight process and its start time, so `disconnect` no longer signals the controller itself or a process that reused the identifier.
 - Selecting an already-connected device focuses the stream instead of toggling input capture.
 - Sessions target the specific Moonlight window they started, so a second stream is no longer focused, closed or switched by mistake.
-- Moonlight pairing drains both pipes and reaps the child on every path, so a failed pairing no longer leaves a process behind.
+- Moonlight pairing runs with the reduced environment, stays alive until the handshake with Sunshine completes, drains both pipes, and is reaped on every failure path, so a failed pairing no longer leaves a process behind.
 - Configuration and desktop launchers are written atomically and no longer follow a symbolic link.
 - Bitrate conversion is checked, and resolution, frame rate and bitrate are range-validated.
 
