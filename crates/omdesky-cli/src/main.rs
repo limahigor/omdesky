@@ -36,7 +36,6 @@ use omdesky_protocol::CommandRequest;
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
-#[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -236,20 +235,18 @@ enum LauncherCommand {
     Remove { target: String },
 }
 
-#[cfg(debug_assertions)]
-fn init_debug_tracing() {
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 }
 
-#[cfg(not(debug_assertions))]
-fn init_debug_tracing() {}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_debug_tracing();
+    init_tracing();
 
     let cli = Cli::parse();
 

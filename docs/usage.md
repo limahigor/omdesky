@@ -164,6 +164,26 @@ Start on the computer reporting the problem:
 omdesky doctor
 ```
 
+### Read the agent log
+
+The agent writes to the user journal at the `info` level:
+
+```bash
+omdesky-agent --version
+journalctl --user -u omdesky-agent -e
+```
+
+For more detail, raise the level with a drop-in and restart the service:
+
+```bash
+systemctl --user edit omdesky-agent
+# add:  [Service]
+#       Environment=RUST_LOG=debug
+systemctl --user restart omdesky-agent
+```
+
+The command-line tool and terminal interface stay silent unless `RUST_LOG` is set, so logging never draws over the interface or mixes with `--json` output; log lines always go to standard error.
+
 ### No devices appear
 
 - Confirm both computers are connected to Tailscale.

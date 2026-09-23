@@ -82,7 +82,7 @@ Targets cover Tailscale status and whois output, `hyprctl` output, the command a
 
 ## Debug output
 
-Debug builds can emit structured runtime details through `RUST_LOG`:
+Every build emits structured runtime details on standard error, filtered by `RUST_LOG`. The agent defaults to `info`; the command-line tool defaults to `off`:
 
 ```bash
 RUST_LOG=debug cargo run -p omdesky-agent --bin omdesky-agent

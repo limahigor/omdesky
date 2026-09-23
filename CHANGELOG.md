@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release builds log. The agent writes structured events to the journal at `info` by default, the command-line tool logs to standard error when `RUST_LOG` is set, and both honor `RUST_LOG`.
+- `omdesky-agent --version` and `--help` print instead of starting the agent, and unknown arguments are refused.
+- At startup the agent waits up to a minute for Tailscale instead of exiting, and startup failures report the error code and detail instead of a generic message.
+- The agent reports its Tailscale hostname; under systemd it previously reported `omarchy` for every computer.
+- The "operation took too long" message is shown for command timeouts again.
+
 - The session record stores the real Moonlight process and its start time, so `disconnect` no longer signals the controller itself or a process that reused the identifier.
 - Selecting an already-connected device focuses the stream instead of toggling input capture.
 - Sessions target the specific Moonlight window they started, so a second stream is no longer focused, closed or switched by mistake.
