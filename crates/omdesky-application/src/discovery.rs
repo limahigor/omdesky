@@ -224,7 +224,7 @@ impl DiscoverNodes {
         };
 
         if ensure_compatible_agent(&health).is_err() {
-            let blocker = incompatible_blocker(&health.agent_version, &node.name, is_local);
+            let blocker = incompatible_blocker(&health.agent_version, is_local);
 
             return Some(node.with_blockers(vec![blocker]));
         }
@@ -235,11 +235,7 @@ impl DiscoverNodes {
             Err(PortError {
                 code: "VERSION_INCOMPATIBLE",
                 ..
-            }) => vec![incompatible_blocker(
-                &health.agent_version,
-                &node.name,
-                is_local,
-            )],
+            }) => vec![incompatible_blocker(&health.agent_version, is_local)],
             _ if is_local => Vec::new(),
             _ => access_blockers(
                 info.as_ref().err(),
@@ -256,25 +252,32 @@ impl DiscoverNodes {
 pub fn blocker_message(node_name: &str, blocker: &NodeBlocker) -> String {
     let fix = &blocker.fix;
 
+    let place = match blocker.side {
+        BlockerSide::Local => "on this computer".to_owned(),
+        BlockerSide::Remote => format!("on {node_name}"),
+    };
+
     match blocker.code {
         BlockerCode::Incompatible => {
-            format!("{node_name} runs a different Omdesky release. {fix}.")
+            format!("{node_name} runs a different Omdesky release. {fix} {place}.")
         }
         BlockerCode::Denied => {
-            format!("{node_name} does not allow this computer. Run `{fix}` on {node_name}.")
+            format!("{node_name} does not allow this computer. Run `{fix}` {place}.")
         }
         BlockerCode::NeedsAccess => {
-            format!("This computer does not accept shortcuts from {node_name}. Run `{fix}` here.")
+            format!(
+                "This computer does not accept shortcuts from {node_name}. Run `{fix}` {place}."
+            )
         }
     }
 }
 
-fn incompatible_blocker(remote_version: &str, remote_name: &str, is_local: bool) -> NodeBlocker {
+fn incompatible_blocker(remote_version: &str, is_local: bool) -> NodeBlocker {
     if is_local {
         return NodeBlocker {
             code: BlockerCode::Incompatible,
             side: BlockerSide::Local,
-            fix: format!("Restart omdesky-agent so it runs Omdesky {RELEASE}"),
+            fix: "Restart omdesky-agent".to_owned(),
         };
     }
 
@@ -287,14 +290,14 @@ fn incompatible_blocker(remote_version: &str, remote_name: &str, is_local: bool)
         return NodeBlocker {
             code: BlockerCode::Incompatible,
             side: BlockerSide::Local,
-            fix: format!("Install Omdesky {remote_version} on this computer"),
+            fix: format!("Install Omdesky {remote_version}"),
         };
     }
 
     NodeBlocker {
         code: BlockerCode::Incompatible,
         side: BlockerSide::Remote,
-        fix: format!("Install Omdesky {RELEASE} on {remote_name}"),
+        fix: format!("Install Omdesky {RELEASE}"),
     }
 }
 
@@ -417,39 +420,36 @@ mod tests {
 
     #[test]
     fn test_an_older_remote_release_is_fixed_on_the_remote_side() {
-        let blocker = incompatible_blocker("0.0.1", "desk-b", false);
+        let blocker = incompatible_blocker("0.0.1", false);
 
         assert_eq!(blocker.side, BlockerSide::Remote);
-        assert_eq!(blocker.fix, format!("Install Omdesky {RELEASE} on desk-b"));
+        assert_eq!(blocker.fix, format!("Install Omdesky {RELEASE}"));
     }
 
     #[test]
     fn test_a_newer_remote_release_is_fixed_on_this_computer() {
         let newer = other_minor_release();
 
-        let blocker = incompatible_blocker(&newer, "desk-b", false);
+        let blocker = incompatible_blocker(&newer, false);
 
         assert_eq!(blocker.side, BlockerSide::Local);
-        assert_eq!(
-            blocker.fix,
-            format!("Install Omdesky {newer} on this computer")
-        );
+        assert_eq!(blocker.fix, format!("Install Omdesky {newer}"));
     }
 
     #[test]
     fn test_an_unreadable_remote_release_is_fixed_on_the_remote_side() {
         assert_eq!(
-            incompatible_blocker("unknown", "desk-b", false).side,
+            incompatible_blocker("unknown", false).side,
             BlockerSide::Remote
         );
     }
 
     #[test]
     fn test_an_outdated_local_agent_is_fixed_by_restarting_it() {
-        let blocker = incompatible_blocker("0.0.1", "desk-a", true);
+        let blocker = incompatible_blocker("0.0.1", true);
 
         assert_eq!(blocker.side, BlockerSide::Local);
-        assert!(blocker.fix.starts_with("Restart omdesky-agent"));
+        assert_eq!(blocker.fix, "Restart omdesky-agent");
     }
 
     #[test]
@@ -498,7 +498,7 @@ mod tests {
         );
         assert_eq!(
             blocker_message("desk-b", &needs_access),
-            "This computer does not accept shortcuts from desk-b. Run `omdesky access allow desk-b` here."
+            "This computer does not accept shortcuts from desk-b. Run `omdesky access allow desk-b` on this computer."
         );
     }
 

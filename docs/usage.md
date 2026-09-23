@@ -121,7 +121,7 @@ omdesky windows workstation --app-id firefox
 
 Add `--json` when you need structured output for a script. Every JSON document is an object with a `schema` number, currently `1`, next to the requested data, such as `devices`, `displays`, `workspaces`, `windows`, `session` or `exit_status`. A script should check `schema` before reading the rest.
 
-In `devices`, each entry carries `status` and a `blockers` list. Every blocker has a `code` (`incompatible`, `denied` or `needs_access`), the `side` that has to change (`local` or `remote`), and a `fix` with the command or action to take there.
+In `devices`, each entry carries `status` and a `blockers` list. Every blocker has a `code` (`incompatible`, `denied` or `needs_access`), the `side` that has to change (`local` or `remote`), and a `fix` with the command or action to take on that side; `fix` never names the computer, `side` does.
 
 A target can be a visible Tailscale hostname, Tailnet IP address, stable Tailscale node ID, or a device name from your Omdesky configuration.
 
