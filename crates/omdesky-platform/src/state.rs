@@ -81,16 +81,12 @@ pub fn create_private_dir_all(path: &Path) -> Result<(), StateError> {
             .recursive(true)
             .mode(0o700)
             .create(path)?;
-
-        return Ok(());
     }
 
     #[cfg(not(unix))]
-    {
-        fs::create_dir_all(path)?;
+    fs::create_dir_all(path)?;
 
-        Ok(())
-    }
+    Ok(())
 }
 
 fn write_and_replace<T: Serialize + ?Sized>(
