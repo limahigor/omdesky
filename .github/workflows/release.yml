@@ -18,6 +18,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - name: Check the release notes
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME#v}" >/dev/null
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: 1.92.0
@@ -60,12 +62,60 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-artifacts
+      - name: Write the release notes from CHANGELOG.md
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > release-notes.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             omdesky-*-x86_64-linux.tar.gz
             omdesky-*-x86_64-linux.tar.gz.sha256
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
+
+  pin-package:
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write
+    concurrency:
+      group: pin-package
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: master
+      - name: Pin PKGBUILD-bin to the published tarball
+        env:
+          OMDESKY_REPO: ${{ github.repository }}
+        run: scripts/update-pkgbuild-sums.sh "${GITHUB_REF_NAME#v}"
+      - name: Commit the pin to master
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          if git diff --quiet -- packaging/arch/PKGBUILD-bin; then
+            echo "PKGBUILD-bin already pins ${version}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/arch/PKGBUILD-bin
+          git commit -m "chore: pin omdesky-bin ${version} checksum"
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master; then
+              exit 0
+            fi
+
+            git pull --rebase origin master
+          done
+
+          exit 1

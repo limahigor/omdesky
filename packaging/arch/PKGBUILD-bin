@@ -1,7 +1,7 @@
 # Maintainer: limahigor
 pkgname=omdesky-bin
 _pkgname=omdesky
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Omarchy-native remote desktop orchestration over Tailscale (prebuilt binaries)'
 arch=('x86_64')
@@ -11,7 +11,7 @@ depends=('tailscale' 'sunshine' 'moonlight-qt')
 provides=('omdesky')
 conflicts=('omdesky')
 source=("$url/releases/download/v$pkgver/omdesky-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('5bb52aba4b19654502f80956b99953acce7f246ea731bb999b90332b7c36339c')
+sha256sums=('e87ad973ba01b4d2bedd0107eecdc642c5b6594596203b30b756d172c29f4832')
 
 package() {
   local src="$srcdir/omdesky-$pkgver-x86_64-linux"
