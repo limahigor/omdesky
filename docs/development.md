@@ -80,6 +80,22 @@ cargo +nightly fuzz run tailscale_status
 
 Targets cover Tailscale status and whois output, `hyprctl` output, the command and pairing request bodies, local configuration and session state, and the display-text sanitizer.
 
+## Wire contract
+
+`tests/fixtures/contract/` holds one JSON example of every control-protocol request and response, the error-code vocabulary, and the `omdesky devices --json` document. `crates/omdesky-application/tests/contract.rs` serializes the current types, compares them with these files, and checks that they round-trip.
+
+`contract.lock` records the release line (`major.minor`) and a digest of the fixtures. Computers only talk to peers on the same release line, so a wire change is a new line:
+
+1. Bump the minor version in `Cargo.toml`; a pre-release such as `0.3.0-dev` counts.
+2. Change the types.
+3. Record the new contract:
+
+```bash
+OMDESKY_UPDATE_CONTRACT=1 cargo test -p omdesky-application --test contract
+```
+
+Recording refuses to overwrite the lock when the digest changed but the release line did not, and the normal test run fails in the same case, so a patch release cannot change the contract by accident.
+
 ## Debug output
 
 Every build emits structured runtime details on standard error, filtered by `RUST_LOG`. The agent defaults to `info`; the command-line tool defaults to `off`:

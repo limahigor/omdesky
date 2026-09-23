@@ -1,0 +1,11 @@
+{
+  "command": {
+    "action": "renew_session"
+  },
+  "issued_at": "2026-09-21T14:13:20Z",
+  "request_id": "0b6f7c2e-5d1a-4c3b-9e8f-7a6b5c4d3e2f",
+  "session": {
+    "generation": 3,
+    "id": "6f1c1b9e-8a3f-4b0e-9f5e-2d7c3a1b4e5f"
+  }
+}

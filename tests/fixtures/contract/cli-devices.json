@@ -1,0 +1,26 @@
+{
+  "devices": [
+    {
+      "address": "100.64.0.2",
+      "agent_version": "0.2.0",
+      "blockers": [
+        {
+          "code": "needs_access",
+          "fix": "omdesky access allow desk-b",
+          "side": "local"
+        }
+      ],
+      "capabilities": [
+        "desktop.stream-host"
+      ],
+      "connection": "direct",
+      "is_local": false,
+      "latency_ms": 4,
+      "name": "desk-b",
+      "omarchy_version": "4.0.1",
+      "status": "blocked",
+      "tailnet_node_id": "nREMOTE"
+    }
+  ],
+  "schema": 1
+}

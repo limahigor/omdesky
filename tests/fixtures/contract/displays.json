@@ -1,0 +1,12 @@
+{
+  "displays": [
+    {
+      "focused": true,
+      "height": 1440,
+      "id": "DP-1",
+      "name": "Main",
+      "refresh_hz": 144.0,
+      "width": 2560
+    }
+  ]
+}

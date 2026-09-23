@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const PROTOCOL: u16 = 2;
+pub const CLI_SCHEMA: u32 = 1;
 
 pub const MAX_PAIRING_ID_BYTES: usize = 64;
 pub const MAX_CLIENT_NAME_BYTES: usize = 64;

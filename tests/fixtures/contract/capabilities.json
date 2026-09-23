@@ -1,0 +1,10 @@
+{
+  "capabilities": [
+    "read_metadata",
+    "focus_workspace",
+    "control_session",
+    "send_shortcut",
+    "close_stream",
+    "approve_pairing"
+  ]
+}

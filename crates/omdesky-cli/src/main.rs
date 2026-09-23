@@ -33,7 +33,7 @@ use omdesky_platform::{
     sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
-use omdesky_protocol::CommandRequest;
+use omdesky_protocol::{CLI_SCHEMA, CommandRequest};
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
@@ -329,14 +329,12 @@ fn status_text(node: &DiscoveredNode) -> &'static str {
     }
 }
 
-const JSON_SCHEMA: u32 = 1;
-
 fn print_json(value: serde_json::Value) -> Result<()> {
     let serde_json::Value::Object(mut fields) = value else {
         anyhow::bail!("JSON output must be an object");
     };
 
-    fields.insert("schema".to_owned(), json!(JSON_SCHEMA));
+    fields.insert("schema".to_owned(), json!(CLI_SCHEMA));
 
     println!("{}", serde_json::to_string_pretty(&fields)?);
 
