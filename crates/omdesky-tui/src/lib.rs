@@ -5,18 +5,18 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use omdesky_application::{
+    access::CallbackAccess,
+    discovery::{DiscoverNodes, DiscoveredNode, blocker_message},
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork,
         PortError, StreamWindowLocator,
     },
-    services::{
-        CallbackAccess, ConnectNode, ConnectRequest, DiscoverNodes, DiscoveredNode,
-        MOONLIGHT_WINDOW_CLASS, ensure_controller_ready,
-    },
+    readiness::ensure_controller_ready,
+    services::{ConnectNode, ConnectRequest, MOONLIGHT_WINDOW_CLASS},
 };
 use omdesky_core::{
-    CodecPreference, ConnectionKind, ControlCapability, DisplayMode, InputMode, NodeStatus,
-    RemoteCommand, StreamProfile, WindowSelector, bitrate_kbps_from_mbps,
+    BlockerCode, CodecPreference, ConnectionKind, ControlCapability, DisplayMode, InputMode,
+    NodeStatus, RemoteCommand, StreamProfile, WindowSelector, bitrate_kbps_from_mbps,
 };
 use omdesky_platform::{
     access::FileAccessStore,
@@ -350,37 +350,34 @@ impl AppState {
 
     fn selected_remote(&self) -> Option<DiscoveredNode> {
         self.selected()
-            .filter(|node| !node.is_local && node.status == NodeStatus::Ready)
+            .filter(|node| node.is_connectable())
             .cloned()
     }
 
-    fn unavailable_reason(&self) -> Option<&str> {
+    fn unavailable_reason(&self) -> Option<String> {
         if let LocalReadiness::Blocked(error) = &self.local_readiness {
-            return Some(error);
+            return Some(error.clone());
         }
 
         if self.local_readiness == LocalReadiness::Checking {
-            return Some("Checking local connection requirements. Please wait.");
+            return Some("Checking local connection requirements. Please wait.".to_owned());
         }
 
         let node = self.selected()?;
 
         if node.is_local {
-            return Some("This device cannot connect to itself");
+            return Some("This device cannot connect to itself".to_owned());
+        }
+
+        if let Some(blocker) = node.blockers.first() {
+            return Some(blocker_message(&node.name, blocker));
         }
 
         match node.status {
             NodeStatus::Ready => None,
-            NodeStatus::Denied => Some(
-                "This device does not allow this computer. Run `omdesky access allow` on it, naming this computer.",
-            ),
-            NodeStatus::NeedsAccess => Some(
-                "This computer does not let the device send shortcuts back. Run `omdesky access allow` here, naming the device.",
-            ),
-            NodeStatus::Incompatible => Some(
-                "This device runs a different Omdesky release. Install the same version on both.",
-            ),
-            NodeStatus::Offline | NodeStatus::AgentUnknown => Some("This device is not ready"),
+            NodeStatus::Blocked | NodeStatus::Offline | NodeStatus::Unavailable => {
+                Some("This device is not ready".to_owned())
+            }
         }
     }
 
@@ -438,7 +435,7 @@ fn start_local_readiness(
     tokio::spawn(async move {
         let endpoint = local_agent_endpoint(agent_port).await;
         let local_agent = match endpoint {
-            Ok(endpoint) => agent.health(&endpoint).await.map(drop),
+            Ok(endpoint) => agent.health(&endpoint).await,
             Err(error) => Err(PortError::new(
                 "LOCAL_AGENT_UNAVAILABLE",
                 error.to_string(),
@@ -491,7 +488,7 @@ fn start_connect(
                 return;
             }
         };
-        let local_agent = agent.health(&controller_endpoint).await.map(drop);
+        let local_agent = agent.health(&controller_endpoint).await;
         let sunshine_configured = credentials.configured().await.unwrap_or(false);
         if let Err(error) = ensure_controller_ready(local_agent, sunshine_configured) {
             let result = Err(user_error("The connection could not be completed.", &error));
@@ -968,7 +965,7 @@ async fn handle_key(
             });
         }
         KeyCode::Enter => {
-            if let Some(reason) = state.unavailable_reason().map(str::to_owned) {
+            if let Some(reason) = state.unavailable_reason() {
                 state.error = Some(format!("ATTENTION: {reason}"));
                 state.notice = None;
             } else if let Some(node) = state.selected_remote() {
@@ -1548,7 +1545,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Omar
     let ready = state
         .nodes
         .iter()
-        .filter(|node| !node.is_local && node.status == NodeStatus::Ready)
+        .filter(|node| node.is_connectable())
         .count();
     let total = state.nodes.iter().filter(|node| !node.is_local).count();
 
@@ -1782,7 +1779,7 @@ fn device_item(node: &DiscoveredNode, theme: &OmarchyTheme) -> ListItem<'static>
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("{}  {:<11}", status_icon(node), status_label(node.status)),
+                format!("{}  {:<12}", status_icon(node), status_label(node)),
                 status_style(node, theme),
             ),
             Span::styled(
@@ -1808,15 +1805,18 @@ fn device_glyph(node: &DiscoveredNode) -> &'static str {
 
 fn status_icon(node: &DiscoveredNode) -> &'static str {
     if node.is_local {
-        "󰐾"
-    } else {
-        match node.status {
-            NodeStatus::Ready => "󰄬",
-            NodeStatus::Offline => "󰅖",
-            NodeStatus::AgentUnknown => "󰋗",
-            NodeStatus::Incompatible => "󰀦",
-            NodeStatus::Denied | NodeStatus::NeedsAccess => "󰌾",
-        }
+        return "󰐾";
+    }
+
+    match (
+        node.status,
+        node.blockers.first().map(|blocker| blocker.code),
+    ) {
+        (NodeStatus::Ready, _) => "󰄬",
+        (NodeStatus::Offline, _) => "󰅖",
+        (NodeStatus::Blocked, Some(BlockerCode::Incompatible)) => "󰀦",
+        (NodeStatus::Blocked, _) => "󰌾",
+        (NodeStatus::Unavailable, _) => "󰋗",
     }
 }
 
@@ -1887,7 +1887,7 @@ fn detail_lines(node: &DiscoveredNode, theme: &OmarchyTheme, width: usize) -> Ve
     lines.push(Line::default());
     lines.extend(wrapped_property_lines(
         "Status",
-        status_label(node.status),
+        status_label(node),
         width,
         theme,
     ));
@@ -2115,14 +2115,18 @@ fn empty_state_lines(state: &AppState, theme: &OmarchyTheme) -> Vec<Line<'static
     ]
 }
 
-fn status_label(status: NodeStatus) -> &'static str {
-    match status {
-        NodeStatus::Ready => "READY",
-        NodeStatus::Offline => "OFFLINE",
-        NodeStatus::AgentUnknown => "UNKNOWN",
-        NodeStatus::Incompatible => "INCOMPATIBLE",
-        NodeStatus::Denied => "DENIED",
-        NodeStatus::NeedsAccess => "NEEDS ACCESS",
+fn status_label(node: &DiscoveredNode) -> &'static str {
+    match (
+        node.status,
+        node.blockers.first().map(|blocker| blocker.code),
+    ) {
+        (NodeStatus::Ready, _) => "READY",
+        (NodeStatus::Offline, _) => "OFFLINE",
+        (NodeStatus::Unavailable, _) => "UNKNOWN",
+        (NodeStatus::Blocked, Some(BlockerCode::Incompatible)) => "INCOMPATIBLE",
+        (NodeStatus::Blocked, Some(BlockerCode::Denied)) => "DENIED",
+        (NodeStatus::Blocked, Some(BlockerCode::NeedsAccess)) => "NEEDS ACCESS",
+        (NodeStatus::Blocked, None) => "BLOCKED",
     }
 }
 
@@ -2138,10 +2142,14 @@ fn status_style(node: &DiscoveredNode, theme: &OmarchyTheme) -> Style {
     let status_color = if node.is_local {
         theme.muted
     } else {
-        match node.status {
-            NodeStatus::Ready => theme.success,
-            NodeStatus::Offline | NodeStatus::Incompatible | NodeStatus::Denied => theme.error,
-            NodeStatus::AgentUnknown | NodeStatus::NeedsAccess => theme.warning,
+        match (
+            node.status,
+            node.blockers.first().map(|blocker| blocker.code),
+        ) {
+            (NodeStatus::Ready, _) => theme.success,
+            (NodeStatus::Blocked, Some(BlockerCode::NeedsAccess))
+            | (NodeStatus::Unavailable, _) => theme.warning,
+            (NodeStatus::Blocked, _) | (NodeStatus::Offline, _) => theme.error,
         }
     };
 
@@ -2343,6 +2351,7 @@ mod tests {
             name: name.to_owned(),
             address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)),
             status: NodeStatus::Ready,
+            blockers: Vec::new(),
             connection: ConnectionKind::Direct,
             latency_ms: Some(4),
             agent_version: Some("0.1.0".to_owned()),
@@ -2523,7 +2532,7 @@ mod tests {
         assert!(state.selected().is_some());
         assert!(state.selected_remote().is_none());
         assert_eq!(
-            state.unavailable_reason(),
+            state.unavailable_reason().as_deref(),
             Some("This device cannot connect to itself")
         );
     }
@@ -2536,7 +2545,7 @@ mod tests {
             LocalReadiness::Blocked("The local agent is not running.".to_owned());
 
         assert_eq!(
-            state.unavailable_reason(),
+            state.unavailable_reason().as_deref(),
             Some("The local agent is not running.")
         );
     }

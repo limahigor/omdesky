@@ -131,13 +131,18 @@ impl AgentClient for HttpAgentClient {
 
         let health: HealthResponse = Self::parse(response).await?;
 
-        if health.agent_version.len() > MAX_VERSION_BYTES
-            || !is_compatible_release(&health.agent_version)
-        {
-            return Err(release_mismatch(Some(&health.agent_version)));
+        if health.agent_version.len() > MAX_VERSION_BYTES {
+            return Err(PortError::new(
+                "AGENT_FIELD_LIMIT",
+                "the device response contained an oversized field",
+                false,
+            ));
         }
 
-        Ok(health)
+        Ok(HealthResponse {
+            agent_version: sanitize_for_display(&health.agent_version, DISPLAY_NAME_LIMIT),
+            ..health
+        })
     }
 
     async fn node_info(&self, endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse> {
@@ -536,19 +541,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health_rejects_an_agent_from_another_release_line() {
-        let (endpoint, server) = serve_once(None, health_body(&other_minor_release())).await;
-
-        let error = HttpAgentClient::new()
-            .health(&endpoint)
-            .await
-            .expect_err("another release line is refused");
-        server.await.expect("server exits");
-
-        assert_eq!(error.code, "VERSION_INCOMPATIBLE");
-    }
-
-    #[tokio::test]
     async fn test_granted_capabilities_ignore_unknown_values() {
         let body = serde_json::json!({
             "capabilities": ["send_shortcut", "future_capability", "close_stream"],
@@ -564,6 +556,20 @@ mod tests {
 
         assert!(request.starts_with("GET /v1/capabilities "));
         assert_eq!(granted, ControlCapability::CALLBACK.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_health_reports_an_agent_from_another_release_line() {
+        let other = other_minor_release();
+        let (endpoint, server) = serve_once(None, health_body(&other)).await;
+
+        let health = HttpAgentClient::new()
+            .health(&endpoint)
+            .await
+            .expect("health answers every release");
+        server.await.expect("server exits");
+
+        assert_eq!(health.agent_version, other);
     }
 
     #[tokio::test]

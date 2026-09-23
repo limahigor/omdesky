@@ -69,6 +69,8 @@ List available computers:
 omdesky devices
 ```
 
+Each device is `ready`, `blocked`, `offline` or `unavailable`. A blocked device is followed by one line per problem that says what is wrong and which command fixes it, and on which computer to run it.
+
 Start a stream by using the displayed device name:
 
 ```bash
@@ -117,7 +119,9 @@ omdesky windows workstation --workspace 2
 omdesky windows workstation --app-id firefox
 ```
 
-Add `--json` when you need structured output for a script.
+Add `--json` when you need structured output for a script. Every JSON document is an object with a `schema` number, currently `1`, next to the requested data, such as `devices`, `displays`, `workspaces`, `windows`, `session` or `exit_status`. A script should check `schema` before reading the rest.
+
+In `devices`, each entry carries `status` and a `blockers` list. Every blocker has a `code` (`incompatible`, `denied` or `needs_access`), the `side` that has to change (`local` or `remote`), and a `fix` with the command or action to take there.
 
 A target can be a visible Tailscale hostname, Tailnet IP address, stable Tailscale node ID, or a device name from your Omdesky configuration.
 
@@ -142,7 +146,7 @@ omdesky access list
 omdesky access revoke controller-hostname
 ```
 
-Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other. Omdesky checks both entries before it pairs or starts a stream and refuses the connection if either is missing; `omdesky devices` shows `Denied` when the other computer does not list this one and `NeedsAccess` when this computer does not list the other.
+Until a controller is listed, every request except the health check is refused. Run these commands on each computer you want to control, and on each controller too: the remote computer sends shortcut and display-switch commands back to the controller, so both sides need an entry for the other. Omdesky checks both entries before it pairs or starts a stream and refuses the connection if either is missing; `omdesky devices` marks such a device as blocked and prints the `omdesky access allow` command to run, and on which computer.
 
 Narrow a grant with `--capability` when a device should do less than everything:
 

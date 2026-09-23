@@ -48,11 +48,31 @@ uuid_id!(SessionId);
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Ready,
+    Blocked,
     Offline,
-    AgentUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerCode {
     Incompatible,
     Denied,
     NeedsAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSide {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NodeBlocker {
+    pub code: BlockerCode,
+    pub side: BlockerSide,
+    pub fix: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

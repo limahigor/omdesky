@@ -3,7 +3,7 @@ pub const RELEASE_HEADER: &str = "omdesky-release";
 
 const MAX_RELEASE_BYTES: usize = 64;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ReleaseLine {
     pub major: u64,
     pub minor: u64,

@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Devices whose agent is incompatible are listed without `--all-tailnet`, so an out-of-date computer is visible rather than missing.
 - **Breaking:** an installation that never populated its allowlist now refuses control requests until `omdesky access allow` names the other computer. Allowlist entries written by earlier versions carry no capabilities and grant nothing; run `omdesky access allow` again to grant them.
 - **Breaking:** the allowlist is consulted in both directions, and a connection now starts only when both are in place. The controller checks its own allowlist grants the other computer `send_shortcut` and `close_stream` before pairing or streaming, and the computer being controlled confirms those grants with the controller before it accepts the session. An installation that listed the controller only on the computer being controlled is refused with a message naming the missing entry, instead of streaming without shortcuts or follow-focus.
-- Device lists mark a computer that does not allow this one as denied, and a computer this one does not allow as needing access, so neither looks ready.
+- A device is `ready`, `blocked`, `offline` or `unavailable`. A blocked device lists every problem found, each with the side that must change and the command that fixes it, so the terminal interface, the command line and the bar plugin give the same instructions.
+- **Breaking for scripts:** every `--json` document is an object with a `schema` number next to the requested data; `omdesky devices --json` returns `{"schema": 1, "devices": [...]}` instead of a bare list.
+- The `omdesky input` subcommand is removed. `input status` repeated `omdesky session`, and the other actions always failed.
 - `/v1/capabilities` answers any listed device with its own grants, without requiring `read_metadata`.
 
 ## [0.1.1] - 2026-09-13

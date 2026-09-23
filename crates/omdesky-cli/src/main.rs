@@ -3,18 +3,19 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use omdesky_application::{
+    access::CallbackAccess,
+    discovery::{DiscoverNodes, DiscoveredNode, blocker_message},
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
         MeshNetwork, RemoteOmarchy, StreamHost,
     },
-    services::{
-        CallbackAccess, ConnectNode, ConnectRequest, DiscoverNodes, PairStream,
-        ensure_controller_ready,
-    },
+    readiness::ensure_controller_ready,
+    services::{ConnectNode, ConnectRequest, PairStream},
 };
 use omdesky_core::{
     CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, NodeId,
-    RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget, bitrate_kbps_from_mbps,
+    NodeStatus, RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget,
+    bitrate_kbps_from_mbps,
     text::{DISPLAY_NAME_LIMIT, sanitize_for_display},
 };
 use omdesky_platform::{
@@ -100,11 +101,6 @@ enum Command {
         action: CommandAction,
     },
 
-    Input {
-        #[command(subcommand)]
-        command: InputCommand,
-    },
-
     Session {
         #[arg(long)]
         json: bool,
@@ -174,14 +170,6 @@ enum CodecArg {
 enum InputArg {
     Local,
     Remote,
-}
-
-#[derive(Subcommand)]
-enum InputCommand {
-    Status,
-    Local,
-    Remote,
-    Toggle,
 }
 
 #[derive(Subcommand)]
@@ -281,7 +269,6 @@ async fn main() -> Result<()> {
         Some(Command::SunshinePin { pin, name }) => sunshine_pin(&pin, &name).await,
         Some(Command::Connect(args)) => connect(args).await,
         Some(Command::RemoteCmd { action }) => remote_command(action).await,
-        Some(Command::Input { command }) => input(command).await,
         Some(Command::Session { json }) => session(json).await,
         Some(Command::Disconnect) => disconnect().await,
         Some(Command::Access { command }) => access(command).await,
@@ -312,20 +299,52 @@ async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
     let nodes = discovery.execute(all_tailnet).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&nodes)?);
-    } else {
-        println!("NAME\tSTATUS\tLINK\tLATENCY");
-        for node in nodes {
-            println!(
-                "{}\t{:?}\t{:?}\t{}",
-                node.name,
-                node.status,
-                node.connection,
-                node.latency_ms
-                    .map_or_else(|| "—".to_owned(), |value| format!("{value}ms"))
-            );
+        return print_json(json!({ "devices": nodes }));
+    }
+
+    println!("NAME\tSTATUS\tLINK\tLATENCY");
+
+    for node in &nodes {
+        println!(
+            "{}\t{}\t{:?}\t{}",
+            node.name,
+            status_text(node),
+            node.connection,
+            node.latency_ms
+                .map_or_else(|| "—".to_owned(), |value| format!("{value}ms"))
+        );
+
+        for blocker in &node.blockers {
+            println!("  {}", blocker_message(&node.name, blocker));
         }
     }
+
+    Ok(())
+}
+
+fn status_text(node: &DiscoveredNode) -> &'static str {
+    if node.is_local {
+        return "this computer";
+    }
+
+    match node.status {
+        NodeStatus::Ready => "ready",
+        NodeStatus::Blocked => "blocked",
+        NodeStatus::Offline => "offline",
+        NodeStatus::Unavailable => "unavailable",
+    }
+}
+
+const JSON_SCHEMA: u32 = 1;
+
+fn print_json(value: serde_json::Value) -> Result<()> {
+    let serde_json::Value::Object(mut fields) = value else {
+        anyhow::bail!("JSON output must be an object");
+    };
+
+    fields.insert("schema".to_owned(), json!(JSON_SCHEMA));
+
+    println!("{}", serde_json::to_string_pretty(&fields)?);
 
     Ok(())
 }
@@ -338,19 +357,19 @@ async fn info(target: &str, json: bool) -> Result<()> {
     let displays = client.displays(&endpoint).await?;
 
     if json {
-        println!("{}", json!({"node": node, "displays": displays}));
-    } else {
-        println!("{} ({})", node.hostname, node.node_id);
+        return print_json(json!({ "node": node, "displays": displays }));
+    }
+
+    println!("{} ({})", node.hostname, node.node_id);
+    println!(
+        "Omarchy {}  ·  agent {}",
+        node.omarchy_version, node.agent_version
+    );
+    for display in displays {
         println!(
-            "Omarchy {}  ·  agent {}",
-            node.omarchy_version, node.agent_version
+            "{} {}x{}@{}",
+            display.id, display.width, display.height, display.refresh_hz
         );
-        for display in displays {
-            println!(
-                "{} {}x{}@{}",
-                display.id, display.width, display.height, display.refresh_hz
-            );
-        }
     }
 
     Ok(())
@@ -361,15 +380,15 @@ async fn displays(target: &str, json: bool) -> Result<()> {
     let displays = HttpAgentClient::new().displays(&endpoint).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&displays)?);
-    } else {
-        for display in displays {
-            let marker = if display.focused { "●" } else { " " };
-            println!(
-                "{marker} {}\t{}x{}@{}",
-                display.id, display.width, display.height, display.refresh_hz
-            );
-        }
+        return print_json(json!({ "displays": displays }));
+    }
+
+    for display in displays {
+        let marker = if display.focused { "●" } else { " " };
+        println!(
+            "{marker} {}\t{}x{}@{}",
+            display.id, display.width, display.height, display.refresh_hz
+        );
     }
 
     Ok(())
@@ -383,20 +402,20 @@ async fn workspaces(target: &str, json: bool) -> Result<()> {
     let windows = client.windows(&endpoint).await.unwrap_or_default();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&workspaces)?);
-    } else {
-        for workspace in workspaces {
-            let name = workspace.name.as_deref().unwrap_or("—");
-            println!("{}  {name}", workspace.id);
-            for window in windows.iter().filter(|w| w.workspace == workspace.id) {
-                let label = window
-                    .title
-                    .as_deref()
-                    .or(window.app_id.as_deref())
-                    .or(window.class.as_deref())
-                    .unwrap_or("—");
-                println!("   {label}");
-            }
+        return print_json(json!({ "workspaces": workspaces }));
+    }
+
+    for workspace in workspaces {
+        let name = workspace.name.as_deref().unwrap_or("—");
+        println!("{}  {name}", workspace.id);
+        for window in windows.iter().filter(|w| w.workspace == workspace.id) {
+            let label = window
+                .title
+                .as_deref()
+                .or(window.app_id.as_deref())
+                .or(window.class.as_deref())
+                .unwrap_or("—");
+            println!("   {label}");
         }
     }
 
@@ -424,17 +443,17 @@ async fn windows(
         .collect::<Vec<_>>();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&windows)?);
-    } else {
-        println!("WORKSPACE\tAPP\tTITLE");
-        for window in windows {
-            println!(
-                "{}\t{}\t{}",
-                window.workspace,
-                window.app_id.or(window.class).as_deref().unwrap_or("—"),
-                window.title.as_deref().unwrap_or("—")
-            );
-        }
+        return print_json(json!({ "windows": windows }));
+    }
+
+    println!("WORKSPACE\tAPP\tTITLE");
+    for window in windows {
+        println!(
+            "{}\t{}\t{}",
+            window.workspace,
+            window.app_id.or(window.class).as_deref().unwrap_or("—"),
+            window.title.as_deref().unwrap_or("—")
+        );
     }
 
     Ok(())
@@ -475,7 +494,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
         .map_err(|error| {
             anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
         })?;
-    let local_agent = client.health(&controller_endpoint).await.map(drop);
+    let local_agent = client.health(&controller_endpoint).await;
     let sunshine_configured = sunshine_credential_store()?.configured().await?;
     ensure_controller_ready(local_agent, sunshine_configured)?;
 
@@ -572,7 +591,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     let exit = exit?;
 
     if args.json {
-        println!("{}", json!({"exit_status": exit}));
+        return print_json(json!({ "exit_status": exit }));
     }
 
     Ok(())
@@ -593,40 +612,25 @@ async fn local_agent_endpoint(port: u16) -> Result<AgentEndpoint> {
     Ok(AgentEndpoint { address, port })
 }
 
-async fn input(command: InputCommand) -> Result<()> {
-    match command {
-        InputCommand::Status => {
-            let mode = read_session().map_or("local", |record| match record.input_mode {
-                InputMode::Local => "local",
-                InputMode::Remote => "remote",
-            });
-            println!("input mode: {mode}");
-            Ok(())
-        }
-        InputCommand::Local | InputCommand::Remote | InputCommand::Toggle => anyhow::bail!(
-            "live input switching is not supported by the installed Moonlight; set --input at connect time"
-        ),
-    }
-}
-
 async fn session(json: bool) -> Result<()> {
     match read_session() {
         Some(record) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&record)?);
-            } else {
-                println!(
-                    "node {}  ·  pid {}  ·  input {}",
-                    sanitize_for_display(&record.remote_node, DISPLAY_NAME_LIMIT),
-                    record
-                        .moonlight
-                        .map_or_else(|| "—".to_owned(), |process| process.pid.to_string()),
-                    match record.input_mode {
-                        InputMode::Local => "local",
-                        InputMode::Remote => "remote",
-                    }
-                );
+                return print_json(json!({ "session": record }));
             }
+
+            println!(
+                "node {}  ·  pid {}  ·  input {}",
+                sanitize_for_display(&record.remote_node, DISPLAY_NAME_LIMIT),
+                record
+                    .moonlight
+                    .map_or_else(|| "—".to_owned(), |process| process.pid.to_string()),
+                match record.input_mode {
+                    InputMode::Local => "local",
+                    InputMode::Remote => "remote",
+                }
+            );
+
             Ok(())
         }
         None => {
@@ -755,15 +759,15 @@ async fn doctor(json: bool) -> Result<()> {
     });
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        for (name, value) in report.as_object().expect("object") {
-            println!(
-                "{name}: {} {}",
-                value["status"].as_str().unwrap_or("FAIL"),
-                value["message"].as_str().unwrap_or("")
-            );
-        }
+        return print_json(report);
+    }
+
+    for (name, value) in report.as_object().expect("object") {
+        println!(
+            "{name}: {} {}",
+            value["status"].as_str().unwrap_or("FAIL"),
+            value["message"].as_str().unwrap_or("")
+        );
     }
 
     Ok(())

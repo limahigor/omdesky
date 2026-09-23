@@ -104,7 +104,7 @@ systemctl --user enable --now omdesky-agent.service
 
 `omdesky setup` asks for the username and password used to open Sunshine's web interface. These credentials stay on that computer in the desktop user's Linux Secret Service collection and are used only to approve Moonlight pairing requests.
 
-`omdesky access allow` is required, not optional. The agent refuses every control request until the controller is listed. Run it on the controller too, naming this computer, because the remote desktop sends shortcut and display-switch commands back. A connection is refused until both entries exist, and the device list shows which side is missing: `Denied` means the other computer does not list this one, `NeedsAccess` means this computer does not list the other.
+`omdesky access allow` is required, not optional. The agent refuses every control request until the controller is listed. Run it on the controller too, naming this computer, because the remote desktop sends shortcut and display-switch commands back. A connection is refused until both entries exist, and `omdesky devices` shows which side is missing and the command that fixes it.
 
 Check the setup with:
 
