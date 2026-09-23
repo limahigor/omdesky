@@ -205,11 +205,6 @@ impl Authorizer {
 
         Ok(entries)
     }
-
-    pub async fn invalidate(&self) {
-        self.identities.lock().await.clear();
-        *self.allowlist.lock().await = None;
-    }
 }
 
 struct Bucket {
@@ -279,7 +274,7 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use omdesky_application::ports::{ConnectionInfo, MeshNodeIdentity, PortError, PortResult};
+    use omdesky_application::ports::{MeshNodeIdentity, PortError, PortResult};
     use omdesky_core::MeshPeer;
     use std::{
         net::Ipv4Addr,
@@ -300,10 +295,6 @@ mod tests {
 
         async fn peers(&self) -> PortResult<Vec<MeshPeer>> {
             Ok(Vec::new())
-        }
-
-        async fn connection_info(&self, _id: &str) -> PortResult<ConnectionInfo> {
-            Err(PortError::new("UNUSED", "unused", false))
         }
 
         async fn identify_source(&self, _source: IpAddr) -> PortResult<Option<MeshNodeIdentity>> {
@@ -334,10 +325,6 @@ mod tests {
 
         async fn revoke(&self, _tailnet_node_id: &str) -> PortResult<()> {
             Ok(())
-        }
-
-        async fn is_allowed(&self, _tailnet_node_id: &str) -> PortResult<bool> {
-            Ok(false)
         }
     }
 

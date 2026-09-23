@@ -14,9 +14,7 @@ use omdesky_core::is_tailscale_address;
 use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{
-        Config, access_path, legacy_sunshine_credentials_path, state_dir, sunshine_config_path,
-    },
+    config::{Config, access_path, state_dir, sunshine_config_path},
     hyprland::HyprlandAdapter,
     identity::NodeIdentity,
     input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
@@ -83,7 +81,7 @@ async fn main() -> Result<()> {
         runner,
         sunshine_config_path().context("resolve Sunshine configuration")?,
         omdesky_platform::sunshine::DEFAULT_API_BASE.to_owned(),
-        SunshineCredentialStore::new(Some(legacy_sunshine_credentials_path()?)),
+        SunshineCredentialStore::default(),
     ));
 
     let notifications = Arc::new(OmarchyNotificationAdapter::default());

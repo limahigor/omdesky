@@ -4,9 +4,6 @@ use omdesky_application::ports::{AccessStore, AllowedController, PortError, Port
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
-/// File-backed authorization allowlist keyed on Tailscale identity. Trust flows
-/// from Tailscale; this only narrows which Tailnet identities may drive the
-/// agent's control actions.
 #[derive(Clone)]
 pub struct FileAccessStore {
     path: PathBuf,
@@ -78,16 +75,6 @@ impl AccessStore for FileAccessStore {
 
         self.write_all(controllers).await
     }
-
-    async fn is_allowed(&self, tailnet_node_id: &str) -> PortResult<bool> {
-        let _guard = self.lock.lock().await;
-
-        Ok(self
-            .read_all()
-            .await?
-            .iter()
-            .any(|candidate| candidate.tailnet_node_id == tailnet_node_id))
-    }
 }
 
 fn state_error(error: impl std::fmt::Display) -> PortError {
@@ -114,9 +101,9 @@ mod tests {
             .await
             .expect("identity allowed");
 
-        assert!(store.is_allowed("node-abc").await.expect("lookup"));
+        assert_eq!(store.list().await.expect("lookup").len(), 1);
         store.revoke("node-abc").await.expect("identity revoked");
-        assert!(!store.is_allowed("node-abc").await.expect("lookup"));
+        assert!(store.list().await.expect("lookup").is_empty());
     }
 
     #[tokio::test]

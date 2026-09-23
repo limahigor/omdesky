@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
-    AgentEndpoint, PortError, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
+    AgentEndpoint, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
 };
 use omdesky_core::{SessionClaim, SessionGrant, SessionId, SessionRole, WindowSelector};
 use std::{sync::Arc, time::Duration};
@@ -338,13 +338,10 @@ where
     }
 }
 
-pub fn session_port_error(error: SessionError) -> PortError {
-    PortError::new(error.code(), error.message(), false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omdesky_application::ports::PortError;
     use std::{
         net::{IpAddr, Ipv4Addr},
         sync::{

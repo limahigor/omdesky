@@ -33,12 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration and desktop launchers are written atomically and no longer follow a symbolic link.
 - Bitrate conversion is checked, and resolution, frame rate and bitrate are range-validated.
 
+### Removed
+
+- The `[general]`, `[input]` and `[files]` configuration sections and the `default_display` and `default_workspace` device settings, which were stored but never applied. Existing files that contain them still load.
+- The migration of plaintext `sunshine-credentials.json` files, which no released version wrote.
+- Unused domain types, port methods and protocol helpers left over from earlier designs.
+
 ### Changed
 
 - **Breaking:** both computers must run the same release line, meaning the same major and minor version. Each side announces its release on every request and response and refuses a peer from another line, including 0.1.1, which announces none. A device from another line is listed as incompatible, and connecting to it fails with a clear message instead of a partial session. Upgrade both ends together.
 - A local agent left running from an earlier release is reported as such, instead of as a stopped agent, so restarting it after an upgrade is the obvious fix.
 - Devices whose agent is incompatible are listed without `--all-tailnet`, so an out-of-date computer is visible rather than missing.
-- **Breaking:** an installation that never populated its allowlist now refuses control requests until `omdesky access allow` names the other computer. Allowlist entries written by earlier versions keep working and are read as holding every capability.
+- **Breaking:** an installation that never populated its allowlist now refuses control requests until `omdesky access allow` names the other computer. Allowlist entries written by earlier versions carry no capabilities and grant nothing; run `omdesky access allow` again to grant them.
 - **Breaking:** the allowlist is consulted in both directions, and a connection now starts only when both are in place. The controller checks its own allowlist grants the other computer `send_shortcut` and `close_stream` before pairing or streaming, and the computer being controlled confirms those grants with the controller before it accepts the session. An installation that listed the controller only on the computer being controlled is refused with a message naming the missing entry, instead of streaming without shortcuts or follow-focus.
 - Device lists mark a computer that does not allow this one as denied, and a computer this one does not allow as needing access, so neither looks ready.
 - `/v1/capabilities` answers any listed device with its own grants, without requiring `read_metadata`.

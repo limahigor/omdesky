@@ -5,7 +5,6 @@ pub mod text;
 use serde::{Deserialize, Serialize};
 use std::{fmt, net::IpAddr, str::FromStr};
 use thiserror::Error;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 macro_rules! uuid_id {
@@ -45,38 +44,6 @@ macro_rules! uuid_id {
 uuid_id!(NodeId);
 uuid_id!(SessionId);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NodeAlias(String);
-
-impl NodeAlias {
-    pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-        let value = value.into();
-        let trimmed = value.trim();
-        if trimmed.is_empty() || trimmed.len() > 64 {
-            return Err(DomainError::InvalidNodeAlias);
-        }
-
-        Ok(Self(trimmed.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for NodeAlias {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TailnetIdentity {
-    pub node_id: String,
-    pub user: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
@@ -107,16 +74,6 @@ impl NodeCapabilities {
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Node {
-    pub id: NodeId,
-    pub hostname: String,
-    pub alias: Option<NodeAlias>,
-    pub tailnet: TailnetIdentity,
-    pub status: NodeStatus,
-    pub capabilities: NodeCapabilities,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -315,18 +272,6 @@ pub enum WorkspaceTarget {
     Name(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct WindowTarget {
-    pub id: WindowId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplaySelection {
-    Automatic,
-    Id(String),
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyModifier {
@@ -431,10 +376,6 @@ impl WindowSelector {
             WindowSelector::Class(class) => format!("class:{class}"),
             WindowSelector::Address(address) => format!("address:{address}"),
         }
-    }
-
-    pub fn identifies_one_window(&self) -> bool {
-        matches!(self, WindowSelector::Address(_))
     }
 }
 
@@ -642,28 +583,6 @@ impl RemoteCommand {
             | RemoteCommand::RenewSession => ControlCapability::ControlSession,
         }
     }
-
-    pub fn is_idempotent(&self) -> bool {
-        match self {
-            RemoteCommand::SendShortcut { .. } => false,
-            RemoteCommand::CloseWindow { .. }
-            | RemoteCommand::SwitchStreamDisplay { .. }
-            | RemoteCommand::AttachSession { .. }
-            | RemoteCommand::DetachSession
-            | RemoteCommand::RenewSession => true,
-        }
-    }
-
-    pub fn controller_exclusive(&self) -> bool {
-        match self {
-            RemoteCommand::SendShortcut { .. }
-            | RemoteCommand::CloseWindow { .. }
-            | RemoteCommand::SwitchStreamDisplay { .. } => false,
-            RemoteCommand::AttachSession { .. }
-            | RemoteCommand::DetachSession
-            | RemoteCommand::RenewSession => false,
-        }
-    }
 }
 
 fn is_safe_key_token(key: &str) -> bool {
@@ -746,86 +665,8 @@ pub enum InputMode {
     Remote,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    Idle,
-    ResolvingNode,
-    CheckingRemote,
-    CheckingStreamPairing,
-    Pairing,
-    PreparingRemote,
-    LaunchingMoonlight,
-    Connected,
-    Stopping,
-    Cleanup,
-    Failed,
-}
-
-impl SessionState {
-    pub fn transition(self, next: Self) -> Result<Self, DomainError> {
-        use SessionState::*;
-        let valid = matches!(
-            (self, next),
-            (Idle, ResolvingNode)
-                | (ResolvingNode, CheckingRemote)
-                | (CheckingRemote, CheckingStreamPairing)
-                | (CheckingStreamPairing, Pairing | PreparingRemote)
-                | (Pairing, PreparingRemote)
-                | (PreparingRemote, LaunchingMoonlight)
-                | (LaunchingMoonlight, Connected)
-                | (Connected, Stopping)
-                | (Stopping, Cleanup)
-                | (Failed, Cleanup)
-                | (Cleanup, Idle)
-        ) || matches!(
-            self,
-            ResolvingNode
-                | CheckingRemote
-                | CheckingStreamPairing
-                | Pairing
-                | PreparingRemote
-                | LaunchingMoonlight
-                | Connected
-        ) && next == Failed;
-
-        valid
-            .then_some(next)
-            .ok_or(DomainError::InvalidSessionTransition {
-                from: self,
-                to: next,
-            })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DesktopSession {
-    pub id: SessionId,
-    pub remote_node: String,
-    pub moonlight_pid: Option<u32>,
-    pub state: SessionState,
-    pub input_mode: InputMode,
-    pub target_display: Option<String>,
-    pub target_workspace: Option<WorkspaceId>,
-    pub started_at: OffsetDateTime,
-}
-
-impl DesktopSession {
-    pub fn transition(&mut self, next: SessionState) -> Result<(), DomainError> {
-        self.state = self.state.transition(next)?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum DomainError {
-    #[error("node alias must contain 1 to 64 non-whitespace characters")]
-    InvalidNodeAlias,
-    #[error("invalid session transition from {from:?} to {to:?}")]
-    InvalidSessionTransition {
-        from: SessionState,
-        to: SessionState,
-    },
     #[error("key chord key must be a short ASCII-alphanumeric token")]
     InvalidKeyChord,
     #[error("window selector is not a safe class token")]
@@ -845,11 +686,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_node_alias_rejects_empty_input() {
-        assert_eq!(NodeAlias::new("  "), Err(DomainError::InvalidNodeAlias));
-    }
-
-    #[test]
     fn test_capabilities_preserve_unknown_values() {
         let capabilities = NodeCapabilities::new([
             "desktop.stream-host".to_owned(),
@@ -857,55 +693,6 @@ mod tests {
         ]);
 
         assert!(capabilities.contains("future.capability"));
-    }
-
-    #[test]
-    fn test_session_state_accepts_full_connect_lifecycle() {
-        let states = [
-            SessionState::ResolvingNode,
-            SessionState::CheckingRemote,
-            SessionState::CheckingStreamPairing,
-            SessionState::PreparingRemote,
-            SessionState::LaunchingMoonlight,
-            SessionState::Connected,
-            SessionState::Stopping,
-            SessionState::Cleanup,
-            SessionState::Idle,
-        ];
-        let final_state = states
-            .into_iter()
-            .try_fold(SessionState::Idle, SessionState::transition)
-            .expect("valid lifecycle");
-
-        assert_eq!(final_state, SessionState::Idle);
-    }
-
-    #[test]
-    fn test_session_state_allows_optional_pairing_step() {
-        assert_eq!(
-            SessionState::CheckingStreamPairing.transition(SessionState::Pairing),
-            Ok(SessionState::Pairing)
-        );
-    }
-
-    #[test]
-    fn test_session_state_rejects_invalid_transition() {
-        assert_eq!(
-            SessionState::Idle.transition(SessionState::Connected),
-            Err(DomainError::InvalidSessionTransition {
-                from: SessionState::Idle,
-                to: SessionState::Connected,
-            })
-        );
-    }
-
-    #[test]
-    fn test_failed_session_requires_cleanup() {
-        assert!(SessionState::Failed.transition(SessionState::Idle).is_err());
-        assert_eq!(
-            SessionState::Failed.transition(SessionState::Cleanup),
-            Ok(SessionState::Cleanup)
-        );
     }
 
     #[test]
@@ -943,19 +730,6 @@ mod tests {
 
         assert!(selector.validate().is_ok());
         assert_eq!(selector.as_hypr(), "class:com.moonlight_stream.Moonlight");
-    }
-
-    #[test]
-    fn test_window_selector_address_targets_exactly_one_window() {
-        let selector = WindowSelector::Address("0x55c9ab12".to_owned());
-
-        assert!(selector.validate().is_ok());
-        assert!(selector.identifies_one_window());
-        assert_eq!(selector.as_hypr(), "address:0x55c9ab12");
-        assert!(
-            !WindowSelector::Class("com.moonlight_stream.Moonlight".to_owned())
-                .identifies_one_window()
-        );
     }
 
     #[test]
@@ -1050,17 +824,6 @@ mod tests {
             .required_capability(),
             ControlCapability::SendShortcut
         );
-    }
-
-    #[test]
-    fn test_shortcut_injection_is_not_idempotent() {
-        let shortcut = RemoteCommand::SendShortcut {
-            chord: KeyChord::new([KeyModifier::Ctrl], "Z").expect("valid chord"),
-            window: WindowSelector::ActiveWindow,
-        };
-
-        assert!(!shortcut.is_idempotent());
-        assert!(RemoteCommand::DetachSession.is_idempotent());
     }
 
     #[test]
@@ -1193,7 +956,6 @@ mod tests {
         assert!(command.validate().is_ok());
         assert_eq!(command.kind(), "switch_stream_display");
         assert!(!command.is_session_control());
-        assert!(!command.controller_exclusive());
     }
 
     #[test]

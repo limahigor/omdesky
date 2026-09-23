@@ -3,9 +3,6 @@ use omdesky_core::NodeId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// A stable, local Omdesky node identifier. It is used only for launcher and
-/// configuration bookkeeping. The control-plane trust anchor is the Tailscale
-/// identity, so this carries no cryptographic key material.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NodeIdentity {
     pub node_id: NodeId,

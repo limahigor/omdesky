@@ -1,5 +1,5 @@
 use crate::state::{StateError, atomic_write_bytes, read_limited_to_string};
-use omdesky_core::{CodecPreference, DisplayMode, InputMode};
+use omdesky_core::{CodecPreference, DisplayMode};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, env, path::PathBuf};
 
@@ -9,12 +9,9 @@ pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub general: GeneralConfig,
     pub network: NetworkConfig,
     pub stream: StreamConfig,
     pub display: DisplayConfig,
-    pub input: InputConfig,
-    pub files: FilesConfig,
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceConfig>,
 }
@@ -47,22 +44,6 @@ impl Config {
     pub fn save_to(&self, path: &std::path::Path) -> Result<(), ConfigError> {
         atomic_write_bytes(path, toml::to_string_pretty(self)?.as_bytes(), false)
             .map_err(ConfigError::State)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GeneralConfig {
-    pub notifications: bool,
-    pub default_input: InputMode,
-}
-
-impl Default for GeneralConfig {
-    fn default() -> Self {
-        Self {
-            notifications: true,
-            default_input: InputMode::Remote,
-        }
     }
 }
 
@@ -114,42 +95,10 @@ pub struct DisplayConfig {
     pub mode: DisplayMode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct InputConfig {
-    pub escape_chord: String,
-}
-
-impl Default for InputConfig {
-    fn default() -> Self {
-        Self {
-            escape_chord: "CTRL+ALT+SHIFT+Z".to_owned(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FilesConfig {
-    pub enabled: bool,
-    pub inbox: PathBuf,
-}
-
-impl Default for FilesConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            inbox: PathBuf::from("~/Downloads/Omdesky"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeviceConfig {
     pub alias: Option<String>,
-    pub default_display: Option<String>,
-    pub default_workspace: Option<String>,
 }
 
 pub fn config_path() -> Result<PathBuf, ConfigError> {
@@ -183,20 +132,8 @@ pub fn access_path() -> Result<PathBuf, ConfigError> {
     state_dir().map(|directory| directory.join("access/allowlist.json"))
 }
 
-pub fn legacy_sunshine_credentials_path() -> Result<PathBuf, ConfigError> {
-    config_dir().map(|directory| directory.join("sunshine-credentials.json"))
-}
-
 pub fn sunshine_config_path() -> Result<PathBuf, ConfigError> {
     Ok(home_dir()?.join(".config/sunshine/sunshine.conf"))
-}
-
-fn config_dir() -> Result<PathBuf, ConfigError> {
-    if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(path).join("omdesky"));
-    }
-
-    Ok(home_dir()?.join(".config/omdesky"))
 }
 
 fn home_dir() -> Result<PathBuf, ConfigError> {
@@ -231,8 +168,17 @@ mod tests {
 
         assert!(config.network.strict_tailnet_only);
         assert!(!config.network.allow_unsafe_wildcard_bind);
-        assert_eq!(config.general.default_input, InputMode::Remote);
         assert_eq!(config.network.agent_port, 48155);
+    }
+
+    #[test]
+    fn test_config_ignores_sections_from_earlier_releases() {
+        let config: Config = toml::from_str(
+            "[general]\nnotifications = true\n[input]\nescape_chord = \"CTRL+Z\"\n[files]\nenabled = false\n[stream]\nfps = 90\n",
+        )
+        .expect("earlier configuration still parses");
+
+        assert_eq!(config.stream.fps, 90);
     }
 
     #[test]

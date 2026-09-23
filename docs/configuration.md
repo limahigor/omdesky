@@ -11,10 +11,6 @@ The file is read from `$XDG_CONFIG_HOME/omdesky/config.toml` when `XDG_CONFIG_HO
 ## Example
 
 ```toml
-[general]
-notifications = true
-default_input = "remote"
-
 [network]
 agent_port = 48155
 strict_tailnet_only = true
@@ -31,16 +27,11 @@ bitrate_mbps = 0
 [display]
 mode = "follow-focus"
 
-[input]
-escape_chord = "CTRL+ALT+SHIFT+Z"
-
 [devices.office]
 alias = "workstation"
-default_display = "DP-1"
-default_workspace = "2"
 ```
 
-Missing settings use the built-in defaults.
+Missing settings use the built-in defaults. Sections from earlier releases that are no longer used, such as `[general]`, `[input]` and `[files]`, are ignored.
 
 ## Stream settings
 
@@ -65,8 +56,6 @@ Entries under `[devices]` provide convenient command targets. In this example, `
 ```bash
 omdesky connect office
 ```
-
-`default_display` and `default_workspace` are stored for future use and do not currently change a connection.
 
 ## Agent port
 
@@ -141,12 +130,6 @@ The controller renews the lease while the stream runs. If the controller crashes
 `omdesky setup` stores the Sunshine web-interface username and password in the desktop user's Linux Secret Service collection. The credentials are not written to `config.toml` or another plaintext configuration file.
 
 Run setup from an unlocked graphical session so the session D-Bus and Secret Service are available. The agent reads the keyring entry when approving a pairing request through Sunshine on the same computer, so restarting it is not required after updating the credentials.
-
-Existing `sunshine-credentials.json` files are migrated into Secret Service and deleted after a successful migration.
-
-## Settings reserved for later use
-
-The current release stores but does not apply `general.notifications`, `general.default_input`, and `input.escape_chord`. Keep their default values unless you are testing upcoming behavior.
 
 ## Rejected and rate-limited requests
 

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
-    CommandRunner, CommandSpec, ConnectionInfo, MeshNetwork, MeshNodeIdentity, PortError,
-    PortResult,
+    CommandRunner, CommandSpec, MeshNetwork, MeshNodeIdentity, PortError, PortResult,
 };
 use omdesky_core::{
     ConnectionKind, MeshPeer,
@@ -65,20 +64,6 @@ impl MeshNetwork for TailscaleAdapter {
             .into_values()
             .map(raw_peer_to_domain)
             .collect())
-    }
-
-    async fn connection_info(&self, tailnet_node_id: &str) -> PortResult<ConnectionInfo> {
-        let peer = self
-            .status()
-            .await?
-            .peers
-            .into_values()
-            .find(|peer| peer.id == tailnet_node_id)
-            .ok_or_else(|| PortError::new("PEER_OFFLINE", "peer is not visible", true))?;
-        Ok(ConnectionInfo {
-            kind: connection_kind(peer.cur_addr.as_deref(), peer.relay.as_deref()),
-            latency_ms: None,
-        })
     }
 
     async fn identify_source(&self, source: IpAddr) -> PortResult<Option<MeshNodeIdentity>> {

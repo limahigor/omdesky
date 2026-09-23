@@ -7,8 +7,8 @@ use crate::ports::{
 use futures::{StreamExt, stream};
 use omdesky_core::{
     ConnectionKind, ControlCapability, InputMode, MeshPeer, NodeCapabilities, NodeStatus,
-    RemoteCommand, SessionEndpoint, SessionGrant, SessionRole, SessionState, StreamProfile,
-    WindowSelector, WorkspaceTarget,
+    RemoteCommand, SessionEndpoint, SessionGrant, SessionRole, StreamProfile, WindowSelector,
+    WorkspaceTarget,
 };
 use omdesky_protocol::{CommandRequest, PROTOCOL_V1, SunshinePairRequest};
 use serde::Serialize;
@@ -819,12 +819,6 @@ pub fn ensure_controller_ready(
     }
 
     Ok(())
-}
-
-pub fn next_state(current: SessionState, next: SessionState) -> PortResult<SessionState> {
-    current
-        .transition(next)
-        .map_err(|error| PortError::new("INVALID_SESSION_TRANSITION", error.to_string(), false))
 }
 
 fn measured_latency_ms(elapsed: std::time::Duration, is_local: bool) -> u32 {

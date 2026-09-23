@@ -113,18 +113,6 @@ impl HyprlandCommandExecutor {
         self.focus_window(window).await
     }
 
-    pub async fn toggle_stream_capture(&self, window: &WindowSelector) -> PortResult<()> {
-        window
-            .validate()
-            .map_err(|error| PortError::new("INVALID_COMMAND", error.to_string(), false))?;
-
-        let lua = timed_shortcut_lua(&capture_toggle_chord(), window, None);
-
-        self.run_hyprland(CommandSpec::new("hyprctl", ["eval".to_owned(), lua]))
-            .await
-            .map(|_| ())
-    }
-
     async fn send_shortcut(&self, chord: &KeyChord, window: &WindowSelector) -> PortResult<()> {
         let previous = match window {
             WindowSelector::ActiveWindow => None,
@@ -465,10 +453,6 @@ fn install_session_keybinds_spec(
     );
 
     for bind in session_keybinds(window) {
-        if role == SessionRole::Remote && bind.command.controller_exclusive() {
-            continue;
-        }
-
         let action = match role {
             SessionRole::Controller => controller_action_lua(&bind),
             SessionRole::Remote => match controller {
@@ -786,42 +770,6 @@ mod tests {
         let lua = &calls[0].args[1];
         assert!(lua.contains("hl.dsp.focus({ window = \"address:0x55aa\" })"));
         assert!(!lua.contains("send_key_state"));
-    }
-
-    #[tokio::test]
-    async fn test_capture_toggle_is_a_separate_explicit_operation() {
-        let runner = Arc::new(ScriptedRunner::new([]));
-        let executor = HyprlandCommandExecutor::new(runner.clone());
-
-        executor
-            .toggle_stream_capture(&WindowSelector::Address("0x55aa".to_owned()))
-            .await
-            .expect("capture toggles");
-
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 1);
-        let lua = &calls[0].args[1];
-        let focus = lua.find("hl.dsp.focus").expect("focus action");
-        let toggle = lua
-            .find("key = \"Z\", state = \"down\"")
-            .expect("toggle action");
-        assert!(focus < toggle);
-        assert!(lua.contains("mods = \"CTRL ALT SHIFT\""));
-        assert!(lua.contains("key = \"Z\", state = \"up\""));
-    }
-
-    #[tokio::test]
-    async fn test_capture_toggle_rejects_an_unsafe_window_handle() {
-        let runner = Arc::new(ScriptedRunner::new([]));
-        let executor = HyprlandCommandExecutor::new(runner.clone());
-
-        let error = executor
-            .toggle_stream_capture(&WindowSelector::Address("0x55; rm -rf /".to_owned()))
-            .await
-            .expect_err("an unsafe handle is rejected");
-
-        assert_eq!(error.code, "INVALID_COMMAND");
-        assert!(runner.calls().is_empty());
     }
 
     #[test]

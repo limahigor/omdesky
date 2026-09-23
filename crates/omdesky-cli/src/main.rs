@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use omdesky_application::{
     ports::{
         AccessStore, AgentClient, AgentEndpoint, AllowedController, LauncherSpec, LauncherStore,
-        MeshNetwork, StreamHost,
+        MeshNetwork, RemoteOmarchy, StreamHost,
     },
     services::{
         CallbackAccess, ConnectNode, ConnectRequest, DiscoverNodes, PairStream,
@@ -20,10 +20,7 @@ use omdesky_core::{
 use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{
-        Config, access_path, legacy_sunshine_credentials_path, runtime_session_path, state_dir,
-        sunshine_config_path,
-    },
+    config::{Config, access_path, runtime_session_path, state_dir, sunshine_config_path},
     hyprland::HyprlandAdapter,
     input::HyprlandSessionKeybinds,
     launcher::DesktopLauncherStore,
@@ -299,9 +296,7 @@ fn agent_client() -> Arc<HttpAgentClient> {
 }
 
 fn sunshine_credential_store() -> Result<SunshineCredentialStore> {
-    Ok(SunshineCredentialStore::new(Some(
-        legacy_sunshine_credentials_path()?,
-    )))
+    Ok(SunshineCredentialStore::default())
 }
 
 async fn devices(json: bool, all_tailnet: bool) -> Result<()> {
@@ -729,7 +724,7 @@ async fn doctor(json: bool) -> Result<()> {
 
     let omarchy = detect_version(runner.as_ref()).await;
     let tailscale = TailscaleAdapter::new(runner.clone()).local_node().await;
-    let hyprland = HyprlandAdapter::new(runner.clone()).displays_probe().await;
+    let hyprland = HyprlandAdapter::new(runner.clone()).displays().await;
     let sunshine = SunshineAdapter::with_api(
         runner,
         sunshine_config_path()?,

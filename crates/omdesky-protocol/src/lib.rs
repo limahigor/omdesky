@@ -14,10 +14,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const PROTOCOL_V1: u16 = 1;
-pub const SUPPORTED_PROTOCOLS: &[u16] = &[PROTOCOL_V1];
 
 pub const MAX_PAIRING_ID_BYTES: usize = 64;
-pub const MAX_PIN_BYTES: usize = 16;
 pub const MAX_CLIENT_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -237,28 +235,10 @@ pub struct ProtocolError {
     pub details: Map<String, Value>,
 }
 
-pub fn negotiate_protocol(client: &[u16], agent: &[u16]) -> Option<u16> {
-    client
-        .iter()
-        .filter(|version| agent.contains(version))
-        .max()
-        .copied()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use omdesky_core::{WindowId, WorkspaceId};
-
-    #[test]
-    fn test_negotiate_protocol_selects_highest_common_version() {
-        assert_eq!(negotiate_protocol(&[1, 2, 3], &[1, 2]), Some(2));
-    }
-
-    #[test]
-    fn test_negotiate_protocol_rejects_incompatible_versions() {
-        assert_eq!(negotiate_protocol(&[2], &[1]), None);
-    }
 
     #[test]
     fn test_health_ignores_unknown_fields() {

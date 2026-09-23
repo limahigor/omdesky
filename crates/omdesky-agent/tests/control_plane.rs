@@ -13,9 +13,9 @@ use omdesky_agent::{
     session::{ActiveSession, SessionCoordinator, SessionEffects},
 };
 use omdesky_application::ports::{
-    AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, ConnectionInfo,
-    MeshNetwork, MeshNodeIdentity, Notification, NotificationService, PortError, PortResult,
-    RemoteOmarchy, StreamHost,
+    AccessStore, AgentClient, AgentEndpoint, AllowedController, CommandExecutor, MeshNetwork,
+    MeshNodeIdentity, Notification, NotificationService, PortError, PortResult, RemoteOmarchy,
+    StreamHost,
 };
 use omdesky_core::{
     ControlCapability, Display, MeshPeer, RemoteCommand, SessionEndpoint, SessionGrant,
@@ -57,10 +57,6 @@ impl MeshNetwork for StaticMesh {
         Ok(Vec::new())
     }
 
-    async fn connection_info(&self, _id: &str) -> PortResult<ConnectionInfo> {
-        Err(PortError::new("UNUSED", "unused", false))
-    }
-
     async fn identify_source(&self, source: IpAddr) -> PortResult<Option<MeshNodeIdentity>> {
         let tailnet_node_id = match source {
             address if address == peer_source().ip() => PEER,
@@ -93,10 +89,6 @@ impl AccessStore for StaticAccess {
 
     async fn revoke(&self, _tailnet_node_id: &str) -> PortResult<()> {
         Ok(())
-    }
-
-    async fn is_allowed(&self, _tailnet_node_id: &str) -> PortResult<bool> {
-        Ok(false)
     }
 }
 

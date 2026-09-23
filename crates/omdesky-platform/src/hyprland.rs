@@ -1,10 +1,9 @@
 use async_trait::async_trait;
 use omdesky_application::ports::{
-    CommandRunner, CommandSpec, DesktopEnvironment, PortError, PortResult, RemoteOmarchy,
-    StreamWindowLocator,
+    CommandRunner, CommandSpec, PortError, PortResult, RemoteOmarchy, StreamWindowLocator,
 };
 use omdesky_core::{
-    Display, InputMode, Window, WindowId, WindowSelector, Workspace, WorkspaceId, WorkspaceTarget,
+    Display, Window, WindowId, WindowSelector, Workspace, WorkspaceId, WorkspaceTarget,
     is_window_address,
 };
 use serde::Deserialize;
@@ -31,11 +30,6 @@ impl HyprlandAdapter {
             .stdout)
     }
 
-    /// Convenience probe for diagnostics without importing the port trait.
-    pub async fn displays_probe(&self) -> PortResult<Vec<Display>> {
-        RemoteOmarchy::displays(self).await
-    }
-
     async fn dispatch(&self, args: Vec<String>) -> PortResult<()> {
         let mut argv = vec!["dispatch".to_owned()];
         argv.extend(args);
@@ -55,22 +49,6 @@ impl StreamWindowLocator for HyprlandAdapter {
         let clients = self.query("clients").await?;
 
         Ok(window_address_for_process(&clients, pid)?.map(WindowSelector::Address))
-    }
-}
-
-#[async_trait]
-impl DesktopEnvironment for HyprlandAdapter {
-    async fn active_display(&self) -> PortResult<Option<Display>> {
-        let displays = RemoteOmarchy::displays(self).await?;
-        Ok(displays
-            .iter()
-            .find(|display| display.focused)
-            .cloned()
-            .or_else(|| displays.into_iter().next()))
-    }
-
-    async fn set_input_mode(&self, _mode: InputMode) -> PortResult<()> {
-        Ok(())
     }
 }
 
@@ -124,7 +102,6 @@ impl RemoteOmarchy for HyprlandAdapter {
     }
 }
 
-/// A Hyprland window handle is an address such as `0x55c9ab12`.
 fn is_window_handle(value: &str) -> bool {
     value
         .strip_prefix("0x")

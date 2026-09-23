@@ -21,7 +21,7 @@ use omdesky_core::{
 use omdesky_platform::{
     access::FileAccessStore,
     agent_client::HttpAgentClient,
-    config::{Config, access_path, legacy_sunshine_credentials_path, state_dir},
+    config::{Config, access_path, state_dir},
     hyprland::HyprlandAdapter,
     input::{HyprlandCommandExecutor, HyprlandSessionKeybinds},
     moonlight::MoonlightAdapter,
@@ -101,9 +101,7 @@ impl Services {
             desktop: Arc::new(HyprlandCommandExecutor::new(runner.clone())),
             windows: Arc::new(HyprlandAdapter::new(runner)),
             access,
-            sunshine_credentials: SunshineCredentialStore::new(Some(
-                legacy_sunshine_credentials_path()?,
-            )),
+            sunshine_credentials: SunshineCredentialStore::default(),
             agent_port: config.network.agent_port,
             client_name: env::var("HOSTNAME").unwrap_or_else(|_| "omdesky".to_owned()),
         })

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use omdesky_core::{
-    ConnectionKind, ControlCapability, Display, DisplayId, InputMode, MeshPeer, NodeId,
-    RemoteCommand, RemoteDesktopTopology, SessionRole, StreamProfile, Window, WindowSelector,
-    Workspace, WorkspaceTarget,
+    ControlCapability, Display, DisplayId, InputMode, MeshPeer, NodeId, RemoteCommand,
+    RemoteDesktopTopology, SessionRole, StreamProfile, Window, WindowSelector, Workspace,
+    WorkspaceTarget,
 };
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
@@ -35,7 +35,7 @@ impl PortError {
 
     pub fn user_message(&self) -> &str {
         match self.code {
-            "AGENT_UNREACHABLE" | "PEER_OFFLINE" => {
+            "AGENT_UNREACHABLE" => {
                 "This device could not be reached. Check that it is online and connected to Tailscale."
             }
             "AGENT_PROTOCOL_INVALID" => {
@@ -145,12 +145,6 @@ pub struct MeshNodeIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionInfo {
-    pub kind: ConnectionKind,
-    pub latency_ms: Option<u32>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEndpoint {
     pub address: IpAddr,
     pub port: u16,
@@ -226,15 +220,11 @@ pub struct AllowedController {
     pub tailnet_node_id: String,
     pub label: Option<String>,
     pub added_at: OffsetDateTime,
-    #[serde(default = "AllowedController::legacy_capabilities")]
+    #[serde(default)]
     pub capabilities: Vec<ControlCapability>,
 }
 
 impl AllowedController {
-    fn legacy_capabilities() -> Vec<ControlCapability> {
-        ControlCapability::ALL.to_vec()
-    }
-
     pub fn new(
         tailnet_node_id: impl Into<String>,
         label: Option<String>,
@@ -349,7 +339,6 @@ pub trait CommandRunner: Send + Sync {
 pub trait MeshNetwork: Send + Sync {
     async fn local_node(&self) -> PortResult<MeshNodeIdentity>;
     async fn peers(&self) -> PortResult<Vec<MeshPeer>>;
-    async fn connection_info(&self, tailnet_node_id: &str) -> PortResult<ConnectionInfo>;
 
     async fn identify_source(&self, source: IpAddr) -> PortResult<Option<MeshNodeIdentity>>;
 }
@@ -440,12 +429,6 @@ pub trait StreamHost: Send + Sync {
 }
 
 #[async_trait]
-pub trait DesktopEnvironment: Send + Sync {
-    async fn active_display(&self) -> PortResult<Option<Display>>;
-    async fn set_input_mode(&self, mode: InputMode) -> PortResult<()>;
-}
-
-#[async_trait]
 pub trait StreamDisplayController: Send + Sync {
     async fn current_display(&self) -> PortResult<DisplayId>;
     async fn switch_display(&self, display: &DisplayId) -> PortResult<()>;
@@ -466,11 +449,6 @@ pub trait AccessStore: Send + Sync {
     async fn list(&self) -> PortResult<Vec<AllowedController>>;
     async fn allow(&self, controller: AllowedController) -> PortResult<()>;
     async fn revoke(&self, tailnet_node_id: &str) -> PortResult<()>;
-    async fn is_allowed(&self, tailnet_node_id: &str) -> PortResult<bool>;
-}
-
-pub trait Clock: Send + Sync {
-    fn now(&self) -> OffsetDateTime;
 }
 
 #[async_trait]

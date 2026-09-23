@@ -204,8 +204,6 @@ async fn read_pin(stdout: tokio::process::ChildStdout) -> PortResult<String> {
     ))
 }
 
-/// Extract the first 4-digit PIN from a Moonlight pairing line such as
-/// "Please enter the following PIN on the host PC: 1234".
 pub fn extract_pin(line: &str) -> Option<String> {
     let digits: String = line
         .chars()
@@ -216,10 +214,6 @@ pub fn extract_pin(line: &str) -> Option<String> {
     (digits.len() == 4).then_some(digits)
 }
 
-/// Build the argument list for the modern moonlight-qt CLI, which uses
-/// `--flag value` syntax (e.g. `--resolution`, `--video-codec`,
-/// `--capture-system-keys`) rather than the legacy `-flag=value` form. We only
-/// emit non-default flags to keep the invocation resilient across versions.
 pub fn launch_arguments(request: &StreamLaunchRequest) -> Vec<String> {
     let mut args = vec![
         "stream".to_owned(),
@@ -231,7 +225,6 @@ pub fn launch_arguments(request: &StreamLaunchRequest) -> Vec<String> {
         request.profile.fps.to_string(),
     ];
 
-    // Cap the bitrate when requested (Moonlight expects kilobits per second).
     if let Some(bitrate_kbps) = request.profile.bitrate_kbps {
         args.push("--bitrate".to_owned());
         args.push(bitrate_kbps.to_string());

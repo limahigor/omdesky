@@ -7,18 +7,15 @@ use omdesky_core::Display;
 use omdesky_protocol::{SunshinePairRequest, SunshineStatusResponse};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use crate::state::read_limited;
-
-use crate::hyprland::HyprlandAdapter;
+use crate::{hyprland::HyprlandAdapter, state::read_limited};
 use omdesky_application::ports::RemoteOmarchy;
 
 pub const DEFAULT_API_BASE: &str = "https://127.0.0.1:47990";
 pub const DESKTOP_APPLICATION: &str = "Desktop";
 const KEYRING_SERVICE: &str = "io.github.limahigor.omdesky.sunshine";
 const MAX_SUNSHINE_CONFIG_BYTES: usize = 256 * 1024;
-const MAX_LEGACY_CREDENTIAL_BYTES: usize = 16 * 1024;
 const KEYRING_ACCOUNT: &str = "admin-api";
 
 #[derive(Clone)]
@@ -41,8 +38,6 @@ pub enum SunshineCredentialError {
     SecretServiceUnavailable,
     #[error("the stored Sunshine credentials are invalid")]
     InvalidStoredCredentials,
-    #[error("legacy Sunshine credentials could not be migrated")]
-    MigrationFailed,
 }
 
 trait CredentialBackend: Send + Sync {
@@ -78,49 +73,27 @@ impl CredentialBackend for SecretServiceCredentialBackend {
 #[derive(Clone)]
 pub struct SunshineCredentialStore {
     backend: Arc<dyn CredentialBackend>,
-    legacy_path: Option<PathBuf>,
+}
+
+impl Default for SunshineCredentialStore {
+    fn default() -> Self {
+        Self {
+            backend: Arc::new(SecretServiceCredentialBackend),
+        }
+    }
 }
 
 impl SunshineCredentialStore {
-    pub fn new(legacy_path: Option<PathBuf>) -> Self {
-        Self {
-            backend: Arc::new(SecretServiceCredentialBackend),
-            legacy_path,
-        }
-    }
-
     #[cfg(test)]
-    fn with_backend(backend: Arc<dyn CredentialBackend>, legacy_path: Option<PathBuf>) -> Self {
-        Self {
-            backend,
-            legacy_path,
-        }
+    fn with_backend(backend: Arc<dyn CredentialBackend>) -> Self {
+        Self { backend }
     }
 
     pub fn load(&self) -> Result<Option<SunshineCredentials>, SunshineCredentialError> {
-        if let Some(secret) = self.backend.load()? {
-            return parse_credentials(&secret).map(Some);
-        }
-
-        let Some(path) = self.legacy_path.as_deref() else {
-            return Ok(None);
-        };
-
-        let secret = match read_limited(path, MAX_LEGACY_CREDENTIAL_BYTES) {
-            Ok(secret) => secret,
-            Err(crate::state::StateError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(_) => return Err(SunshineCredentialError::MigrationFailed),
-        };
-        let credentials = parse_credentials(&secret)?;
-
-        self.store(&credentials.username, credentials.password.expose_secret())?;
-        fs::remove_file(path).map_err(|_| SunshineCredentialError::MigrationFailed)?;
-
-        Ok(Some(credentials))
+        self.backend
+            .load()?
+            .map(|secret| parse_credentials(&secret))
+            .transpose()
     }
 
     pub async fn configured(&self) -> PortResult<bool> {
@@ -392,30 +365,6 @@ fn config_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-pub fn ensure_ready(readiness: &HostReadiness) -> PortResult<()> {
-    if !readiness.installed {
-        Err(PortError::new(
-            "SUNSHINE_NOT_INSTALLED",
-            "Sunshine is not installed",
-            false,
-        ))
-    } else if !readiness.running {
-        Err(PortError::new(
-            "SUNSHINE_NOT_RUNNING",
-            "Sunshine is not running",
-            true,
-        ))
-    } else if !readiness.capture_ready || !readiness.input_ready {
-        Err(PortError::new(
-            "SUNSHINE_NOT_READY",
-            "Sunshine is not ready",
-            false,
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,22 +385,6 @@ mod tests {
         assert!(!is_loopback_api("https://100.64.0.7:47990"));
         assert!(!is_loopback_api("https://sunshine.example:47990"));
         assert!(!is_loopback_api("127.0.0.1:47990"));
-    }
-
-    #[test]
-    fn test_ensure_ready_maps_missing_installation() {
-        let readiness = HostReadiness {
-            installed: false,
-            running: false,
-            capture_ready: false,
-            input_ready: false,
-            exposure_warning: None,
-        };
-
-        assert_eq!(
-            ensure_ready(&readiness).expect_err("not ready").code,
-            "SUNSHINE_NOT_INSTALLED"
-        );
     }
 
     #[derive(Default)]
@@ -484,10 +417,8 @@ mod tests {
 
     #[test]
     fn test_credentials_round_trip_through_secret_store() {
-        let store = SunshineCredentialStore::with_backend(
-            Arc::new(MemoryCredentialBackend::default()),
-            None,
-        );
+        let store =
+            SunshineCredentialStore::with_backend(Arc::new(MemoryCredentialBackend::default()));
 
         store.store("admin", "s3cret").expect("stored");
 
@@ -497,44 +428,19 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_plaintext_credentials_are_migrated_and_removed() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("sunshine-credentials.json");
-        let record = serde_json::json!({ "username": "admin", "password": "s3cret" });
-        crate::state::atomic_write_json(&path, &record, true).expect("legacy credentials");
-        let store = SunshineCredentialStore::with_backend(
-            Arc::new(MemoryCredentialBackend::default()),
-            Some(path.clone()),
-        );
+    fn test_an_unavailable_secret_service_is_reported() {
+        let store = SunshineCredentialStore::with_backend(Arc::new(FailingCredentialBackend));
 
-        let loaded = store.load().expect("migration succeeds").expect("loaded");
-
-        assert_eq!(loaded.username, "admin");
-        assert_eq!(loaded.password.expose_secret(), "s3cret");
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn test_failed_migration_keeps_legacy_plaintext_credentials() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("sunshine-credentials.json");
-        let record = serde_json::json!({ "username": "admin", "password": "s3cret" });
-        crate::state::atomic_write_json(&path, &record, true).expect("legacy credentials");
-        let store = SunshineCredentialStore::with_backend(
-            Arc::new(FailingCredentialBackend),
-            Some(path.clone()),
-        );
-
-        assert!(store.load().is_err());
-        assert!(path.exists());
+        assert!(matches!(
+            store.store("admin", "s3cret"),
+            Err(SunshineCredentialError::SecretServiceUnavailable)
+        ));
     }
 
     #[test]
     fn test_empty_credentials_are_rejected() {
-        let store = SunshineCredentialStore::with_backend(
-            Arc::new(MemoryCredentialBackend::default()),
-            None,
-        );
+        let store =
+            SunshineCredentialStore::with_backend(Arc::new(MemoryCredentialBackend::default()));
 
         assert!(store.store("", "").is_err());
         assert!(store.load().expect("keyring available").is_none());
