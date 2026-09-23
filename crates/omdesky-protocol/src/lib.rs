@@ -1,19 +1,20 @@
 #![forbid(unsafe_code)]
 
+pub mod error;
 pub mod release;
 
+pub use error::{ErrorCode, ErrorEnvelope, ProtocolError};
 pub use release::{RELEASE, RELEASE_HEADER, ReleaseLine, is_compatible_release};
 
 use omdesky_core::{
     ControlCapability, Display, RemoteCommand, SessionClaim, SessionGrant, Window, Workspace,
     WorkspaceTarget,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub const PROTOCOL_V1: u16 = 1;
+pub const PROTOCOL: u16 = 2;
 
 pub const MAX_PAIRING_ID_BYTES: usize = 64;
 pub const MAX_CLIENT_NAME_BYTES: usize = 64;
@@ -31,7 +32,6 @@ pub struct NodeInfoResponse {
     pub hostname: String,
     pub omarchy_version: String,
     pub agent_version: String,
-    pub protocol_versions: Vec<u16>,
     pub capabilities: Vec<String>,
 }
 
@@ -71,11 +71,9 @@ pub struct CommandRequest {
     pub command: RemoteCommand,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionClaim>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub issued_at: Option<OffsetDateTime>,
+    pub request_id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    pub issued_at: OffsetDateTime,
 }
 
 impl CommandRequest {
@@ -83,8 +81,8 @@ impl CommandRequest {
         Self {
             command,
             session: None,
-            request_id: Some(Uuid::new_v4()),
-            issued_at: Some(OffsetDateTime::now_utc()),
+            request_id: Uuid::new_v4(),
+            issued_at: OffsetDateTime::now_utc(),
         }
     }
 
@@ -144,8 +142,7 @@ pub struct SunshinePairChallengeResponse {
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SunshinePairRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pairing_id: Option<String>,
+    pub pairing_id: String,
     pub pin: String,
     pub client_name: String,
 }
@@ -167,13 +164,12 @@ impl SunshinePairRequest {
             return Err(PairingFieldError::ClientName);
         }
 
-        let pairing_id_valid = self.pairing_id.as_ref().is_none_or(|id| {
-            !id.is_empty()
-                && id.len() <= MAX_PAIRING_ID_BYTES
-                && id
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
-        });
+        let pairing_id_valid = !self.pairing_id.is_empty()
+            && self.pairing_id.len() <= MAX_PAIRING_ID_BYTES
+            && self
+                .pairing_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-');
 
         if !pairing_id_valid {
             return Err(PairingFieldError::PairingId);
@@ -201,16 +197,6 @@ pub enum PairingFieldError {
     PairingId,
 }
 
-impl PairingFieldError {
-    pub fn code(self) -> &'static str {
-        match self {
-            PairingFieldError::Pin => "INVALID_PAIRING_PIN",
-            PairingFieldError::ClientName => "INVALID_PAIRING_CLIENT",
-            PairingFieldError::PairingId => "INVALID_PAIRING_CHALLENGE",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SunshinePairResponse {
     pub paired: bool,
@@ -218,21 +204,22 @@ pub struct SunshinePairResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
+    #[serde(deserialize_with = "known_capabilities")]
     pub capabilities: Vec<ControlCapability>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ErrorEnvelope {
-    pub error: ProtocolError,
-}
+fn known_capabilities<'de, D>(deserializer: D) -> Result<Vec<ControlCapability>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProtocolError {
-    pub code: String,
-    pub message: String,
-    pub retryable: bool,
-    #[serde(default)]
-    pub details: Map<String, Value>,
+    let capabilities = values
+        .iter()
+        .filter_map(|value| value.parse().ok())
+        .collect();
+
+    Ok(capabilities)
 }
 
 #[cfg(test)]
@@ -259,21 +246,6 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("serializable node info");
 
         assert!(encoded.contains("future.value"));
-    }
-
-    #[test]
-    fn test_error_envelope_has_stable_fields() {
-        let error = ErrorEnvelope {
-            error: ProtocolError {
-                code: "SUNSHINE_NOT_READY".to_owned(),
-                message: "Sunshine is not ready".to_owned(),
-                retryable: false,
-                details: Map::new(),
-            },
-        };
-        let value = serde_json::to_value(error).expect("serializable error");
-
-        assert_eq!(value["error"]["code"], "SUNSHINE_NOT_READY");
     }
 
     #[test]
@@ -314,7 +286,7 @@ mod tests {
     #[test]
     fn test_command_request_roundtrips_typed_shortcut() {
         let request: CommandRequest = serde_json::from_str(
-            r#"{"command":{"action":"send_shortcut","chord":{"mods":["ctrl","alt","shift"],"key":"Z"},"window":{"class":"com.moonlight_stream.Moonlight"}}}"#,
+            r#"{"command":{"action":"send_shortcut","chord":{"mods":["ctrl","alt","shift"],"key":"Z"},"window":{"class":"com.moonlight_stream.Moonlight"}},"request_id":"6f1c1b9e-8a3f-4b0e-9f5e-2d7c3a1b4e5f","issued_at":"2026-09-23T12:00:00Z"}"#,
         )
         .expect("valid command request");
         let value = serde_json::to_value(&request).expect("serializable command request");
@@ -342,14 +314,27 @@ mod tests {
     }
 
     #[test]
-    fn test_command_request_tolerates_a_bare_command() {
-        let request: CommandRequest =
-            serde_json::from_str(r#"{"command":{"action":"detach_session"}}"#)
-                .expect("bare command still parses");
+    fn test_command_request_requires_freshness_fields() {
+        let result =
+            serde_json::from_str::<CommandRequest>(r#"{"command":{"action":"detach_session"}}"#);
 
-        assert_eq!(request.session, None);
-        assert_eq!(request.request_id, None);
-        assert_eq!(request.issued_at, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_capabilities_response_ignores_unknown_capabilities() {
+        let response: CapabilitiesResponse = serde_json::from_str(
+            r#"{"capabilities":["send_shortcut","future_capability","close_stream"]}"#,
+        )
+        .expect("tolerant capabilities");
+
+        assert_eq!(
+            response.capabilities,
+            vec![
+                ControlCapability::SendShortcut,
+                ControlCapability::CloseStream
+            ]
+        );
     }
 
     #[test]
@@ -374,7 +359,7 @@ mod tests {
     #[test]
     fn test_pairing_request_rejects_malformed_fields() {
         let valid = SunshinePairRequest {
-            pairing_id: Some("ab-12".to_owned()),
+            pairing_id: "ab-12".to_owned(),
             pin: "1234".to_owned(),
             client_name: "desktop-a".to_owned(),
         };
@@ -393,7 +378,7 @@ mod tests {
         assert_eq!(hostile_name.validate(), Err(PairingFieldError::ClientName));
 
         let hostile_challenge = SunshinePairRequest {
-            pairing_id: Some("../../etc".to_owned()),
+            pairing_id: "../../etc".to_owned(),
             ..valid
         };
         assert_eq!(
@@ -405,7 +390,7 @@ mod tests {
     #[test]
     fn test_pairing_request_debug_never_reveals_the_pin() {
         let request = SunshinePairRequest {
-            pairing_id: None,
+            pairing_id: "ab-12".to_owned(),
             pin: "4821".to_owned(),
             client_name: "desktop-a".to_owned(),
         };

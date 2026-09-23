@@ -4,7 +4,7 @@ use omdesky_application::ports::{
     CommandRunner, CommandSpec, HostReadiness, PortError, PortResult, StreamHost,
 };
 use omdesky_core::Display;
-use omdesky_protocol::{SunshinePairRequest, SunshineStatusResponse};
+use omdesky_protocol::SunshineStatusResponse;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -268,7 +268,7 @@ impl StreamHost for SunshineAdapter {
         RemoteOmarchy::displays(&self.desktop).await
     }
 
-    async fn submit_pairing_pin(&self, request: SunshinePairRequest) -> PortResult<()> {
+    async fn submit_pairing_pin(&self, pin: &str, client_name: &str) -> PortResult<()> {
         let credentials = self.credentials().await?.ok_or_else(|| {
             PortError::new(
                 "SUNSHINE_API_UNAVAILABLE",
@@ -285,8 +285,8 @@ impl StreamHost for SunshineAdapter {
                 Some(credentials.password.expose_secret()),
             )
             .json(&serde_json::json!({
-                "pin": request.pin,
-                "name": request.client_name,
+                "pin": pin,
+                "name": client_name,
             }))
             .send()
             .await

@@ -38,7 +38,7 @@ impl PortError {
             "AGENT_UNREACHABLE" => {
                 "This device could not be reached. Check that it is online and connected to Tailscale."
             }
-            "AGENT_PROTOCOL_INVALID" => {
+            "AGENT_PROTOCOL_INVALID" | "AGENT_RESPONSE_LIMIT" | "AGENT_FIELD_LIMIT" => {
                 "This device sent an unexpected response. Make sure Omdesky is up to date on both devices."
             }
             "AGENT_REQUEST_FAILED" => {
@@ -91,6 +91,24 @@ impl PortError {
             "LOCAL_AGENT_INCOMPATIBLE" => {
                 "The local Omdesky agent runs a different release. Restart omdesky-agent after upgrading."
             }
+            "RATE_LIMITED" => "The other device is busy. Wait a moment and try again.",
+            "IDENTITY_UNAVAILABLE" => {
+                "The other device could not confirm this computer's Tailscale identity. Try again."
+            }
+            "REQUEST_STALE" => {
+                "The clocks of the two computers differ too much. Check their time settings."
+            }
+            "REQUEST_REPLAYED" => "This action was already applied.",
+            "PAIRING_CHALLENGE_INVALID" => "The pairing attempt expired. Start pairing again.",
+            "SESSION_ALREADY_OWNED" => "Another computer is already controlling this device.",
+            "SESSION_NOT_OWNED" | "SESSION_NOT_FOUND" | "SESSION_NOT_GRANTED" | "NO_CONTROLLER" => {
+                "The remote session is no longer active. Connect again."
+            }
+            "SESSION_EFFECTS_FAILED" => {
+                "The other device could not set up remote shortcuts. Make sure Hyprland is running there."
+            }
+            "MOONLIGHT_UNSUPPORTED" => "The installed Moonlight version is not supported.",
+            "INVALID_STREAM_PROFILE" => "The stream settings are outside the supported range.",
             "CAPABILITY_DENIED" => {
                 "The other device does not allow this action. Grant it there with `omdesky access allow`."
             }
@@ -113,11 +131,11 @@ impl PortError {
                 "This Omarchy version is not supported. Omarchy 4 is required."
             }
             "OMARCHY_VERSION_UNKNOWN" => "The installed Omarchy version could not be detected.",
-            "COMMAND_TIMED_OUT" => "The operation took too long. Please try again.",
+            "COMMAND_TIMEOUT" => "The operation took too long. Please try again.",
             "COMMAND_NOT_AVAILABLE" => {
                 "A required program is not installed or could not be started."
             }
-            "INVALID_COMMAND" | "COMMAND_NOT_EXECUTABLE" | "INVALID_SESSION_TRANSITION" => {
+            "INVALID_COMMAND" | "COMMAND_NOT_EXECUTABLE" => {
                 "This action is not available right now."
             }
             "LAUNCHER_IO_FAILED" => {
@@ -425,7 +443,7 @@ pub trait StreamHost: Send + Sync {
     async fn readiness(&self) -> PortResult<HostReadiness>;
     async fn status(&self) -> PortResult<SunshineStatusResponse>;
     async fn displays(&self) -> PortResult<Vec<Display>>;
-    async fn submit_pairing_pin(&self, request: SunshinePairRequest) -> PortResult<()>;
+    async fn submit_pairing_pin(&self, pin: &str, client_name: &str) -> PortResult<()>;
 }
 
 #[async_trait]

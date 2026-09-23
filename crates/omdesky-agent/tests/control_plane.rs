@@ -23,8 +23,8 @@ use omdesky_core::{
 };
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, ErrorEnvelope, HealthResponse,
-    NodeInfoResponse, RELEASE, RELEASE_HEADER, ReleaseLine, SunshinePairChallengeResponse,
-    SunshinePairRequest, SunshineStatusResponse,
+    NodeInfoResponse, PROTOCOL, RELEASE, RELEASE_HEADER, ReleaseLine,
+    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -137,7 +137,7 @@ impl StreamHost for UnusedStreamHost {
         Ok(Vec::new())
     }
 
-    async fn submit_pairing_pin(&self, _request: SunshinePairRequest) -> PortResult<()> {
+    async fn submit_pairing_pin(&self, _pin: &str, _client_name: &str) -> PortResult<()> {
         Ok(())
     }
 }
@@ -282,7 +282,6 @@ fn state_with_controller_grants(
             hostname: "local".to_owned(),
             omarchy_version: "4.0.0".to_owned(),
             agent_version: "0.1.1".to_owned(),
-            protocol_versions: vec![1],
             capabilities: Vec::new(),
         },
         desktop: Arc::new(EmptyDesktop),
@@ -390,7 +389,7 @@ async fn test_health_stays_reachable_without_authorization() {
     let (status, body) = call(&state, peer_source(), get("/v1/health")).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(decode::<HealthResponse>(&body).protocol, 1);
+    assert_eq!(decode::<HealthResponse>(&body).protocol, PROTOCOL);
 }
 
 fn get_with_release(path: &str, release: Option<&str>) -> Request<Body> {
@@ -561,6 +560,24 @@ async fn test_a_listed_peer_reads_its_own_grants_without_read_metadata() {
         ControlCapability::CALLBACK.to_vec()
     );
     assert_eq!(unlisted, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_a_malformed_body_is_answered_with_an_error_envelope() {
+    let state = state(vec![entry(PEER, &ControlCapability::ALL)]);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/commands")
+        .header(RELEASE_HEADER, RELEASE)
+        .header("content-type", "application/json")
+        .body(Body::from("{\"command\":"))
+        .expect("valid request");
+
+    let (status, body) = call(&state, peer_source(), request).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(decode::<ErrorEnvelope>(&body).error.code, "INVALID_COMMAND");
 }
 
 #[tokio::test]
@@ -832,11 +849,7 @@ async fn test_pairing_requires_a_live_single_use_challenge() {
         peer_source(),
         post_json(
             "/v1/sunshine/pair",
-            &SunshinePairRequest {
-                pairing_id: None,
-                pin: "1234".to_owned(),
-                client_name: "desktop-a".to_owned(),
-            },
+            &serde_json::json!({ "pin": "1234", "client_name": "desktop-a" }),
         ),
     )
     .await;
@@ -852,7 +865,7 @@ async fn test_pairing_requires_a_live_single_use_challenge() {
     let pairing_id = decode::<SunshinePairChallengeResponse>(&body).pairing_id;
 
     let request = SunshinePairRequest {
-        pairing_id: Some(pairing_id),
+        pairing_id,
         pin: "1234".to_owned(),
         client_name: "desktop-a".to_owned(),
     };
@@ -895,7 +908,7 @@ async fn test_a_challenge_issued_to_one_peer_cannot_be_used_by_another() {
         post_json(
             "/v1/sunshine/pair",
             &SunshinePairRequest {
-                pairing_id: Some(pairing_id),
+                pairing_id,
                 pin: "1234".to_owned(),
                 client_name: "desktop-b".to_owned(),
             },
@@ -916,7 +929,7 @@ async fn test_a_malformed_pin_is_rejected_before_reaching_sunshine() {
         post_json(
             "/v1/sunshine/pair",
             &SunshinePairRequest {
-                pairing_id: Some("abcd".to_owned()),
+                pairing_id: "abcd".to_owned(),
                 pin: "not-a-pin".to_owned(),
                 client_name: "desktop-a".to_owned(),
             },

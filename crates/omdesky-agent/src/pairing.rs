@@ -1,3 +1,4 @@
+use omdesky_protocol::ErrorCode;
 use rand::RngExt;
 use std::{
     collections::HashMap,
@@ -18,10 +19,10 @@ pub enum PairingError {
 }
 
 impl PairingError {
-    pub fn code(self) -> &'static str {
+    pub fn code(self) -> ErrorCode {
         match self {
-            PairingError::RateLimited => "PAIRING_RATE_LIMITED",
-            PairingError::UnknownChallenge => "PAIRING_CHALLENGE_INVALID",
+            PairingError::RateLimited => ErrorCode::RateLimited,
+            PairingError::UnknownChallenge => ErrorCode::PairingChallengeInvalid,
         }
     }
 

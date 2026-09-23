@@ -5,13 +5,13 @@ use omdesky_core::{
     text::{DISPLAY_LINE_LIMIT, DISPLAY_NAME_LIMIT, sanitize_for_display, sanitize_optional},
 };
 use omdesky_protocol::{
-    ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
-    FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, RELEASE, RELEASE_HEADER,
-    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse, WindowsResponse,
-    WorkspacesResponse, is_compatible_release,
+    ActiveWindowResponse, CapabilitiesResponse, CommandRequest, CommandResponse, DisplaysResponse,
+    ErrorEnvelope, FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, RELEASE,
+    RELEASE_HEADER, SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse,
+    WindowsResponse, WorkspacesResponse, is_compatible_release,
 };
 use reqwest::StatusCode;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -150,11 +150,11 @@ impl AgentClient for HttpAgentClient {
         &self,
         endpoint: &AgentEndpoint,
     ) -> PortResult<Vec<ControlCapability>> {
-        let response: GrantedCapabilities = self
+        let response: CapabilitiesResponse = self
             .get(endpoint, "/v1/capabilities", REQUEST_TIMEOUT)
             .await?;
 
-        Ok(known_capabilities(response.capabilities))
+        Ok(response.capabilities)
     }
 
     async fn displays(&self, endpoint: &AgentEndpoint) -> PortResult<Vec<Display>> {
@@ -261,19 +261,6 @@ impl AgentClient for HttpAgentClient {
     }
 }
 
-#[derive(Deserialize)]
-struct GrantedCapabilities {
-    capabilities: Vec<String>,
-}
-
-fn known_capabilities(capabilities: Vec<String>) -> Vec<ControlCapability> {
-    capabilities
-        .iter()
-        .take(MAX_CAPABILITIES)
-        .filter_map(|capability| capability.parse().ok())
-        .collect()
-}
-
 fn sanitize_display(display: Display) -> Display {
     Display {
         id: sanitize_for_display(&display.id, DISPLAY_NAME_LIMIT),
@@ -310,7 +297,6 @@ fn sanitize_node_info(response: NodeInfoResponse) -> NodeInfoResponse {
             .iter()
             .map(|capability| sanitize_for_display(capability, DISPLAY_NAME_LIMIT))
             .collect(),
-        ..response
     }
 }
 
@@ -319,7 +305,6 @@ fn validate_node_info(response: NodeInfoResponse) -> PortResult<NodeInfoResponse
         && response.hostname.len() <= MAX_NODE_FIELD_BYTES
         && response.omarchy_version.len() <= MAX_VERSION_BYTES
         && response.agent_version.len() <= MAX_VERSION_BYTES
-        && response.protocol_versions.len() <= 32
         && response.capabilities.len() <= MAX_CAPABILITIES
         && response
             .capabilities
@@ -373,50 +358,39 @@ fn network_error(error: reqwest::Error) -> PortError {
 }
 
 fn http_error(status: StatusCode, envelope: Option<ErrorEnvelope>) -> PortError {
+    let known = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.error.known_code());
+
     tracing::debug!(
         %status,
         remote_code = ?envelope.as_ref().map(|value| value.error.code.as_str()),
         "agent.http_error"
     );
 
-    envelope.map_or_else(
-        || {
-            PortError::new(
-                "AGENT_REQUEST_FAILED",
-                format!("agent returned HTTP {status}"),
-                status.is_server_error(),
-            )
-        },
-        |envelope| {
-            let code = match envelope.error.code.as_str() {
-                "UNAUTHORIZED" => "UNAUTHORIZED",
-                "OMARCHY_UNSUPPORTED" => "OMARCHY_UNSUPPORTED",
-                "HYPRLAND_UNAVAILABLE" => "HYPRLAND_UNAVAILABLE",
-                "DISPLAY_NOT_FOUND" => "DISPLAY_NOT_FOUND",
-                "WORKSPACE_NOT_FOUND" => "WORKSPACE_NOT_FOUND",
-                "WINDOW_NOT_FOUND" => "WINDOW_NOT_FOUND",
-                "SUNSHINE_NOT_INSTALLED" => "SUNSHINE_NOT_INSTALLED",
-                "SUNSHINE_NOT_RUNNING" => "SUNSHINE_NOT_RUNNING",
-                "SUNSHINE_API_UNAVAILABLE" => "SUNSHINE_API_UNAVAILABLE",
-                "SUNSHINE_PAIRING_FAILED" => "SUNSHINE_PAIRING_FAILED",
-                "INVALID_COMMAND" => "INVALID_COMMAND",
-                "VERSION_INCOMPATIBLE" => "VERSION_INCOMPATIBLE",
-                "CAPABILITY_DENIED" => "CAPABILITY_DENIED",
-                "CALLBACK_ACCESS_MISSING" => "CALLBACK_ACCESS_MISSING",
-                "CONTROLLER_UNREACHABLE" => "CONTROLLER_UNREACHABLE",
-                _ => "AGENT_REQUEST_FAILED",
-            };
-
-            PortError::new(code, envelope.error.message, envelope.error.retryable)
-        },
-    )
+    match (known, envelope) {
+        (Some(code), Some(envelope)) => PortError::new(
+            code.as_str(),
+            envelope.error.message,
+            envelope.error.retryable,
+        ),
+        (None, Some(envelope)) => PortError::new(
+            "AGENT_REQUEST_FAILED",
+            envelope.error.message,
+            envelope.error.retryable,
+        ),
+        (_, None) => PortError::new(
+            "AGENT_REQUEST_FAILED",
+            format!("agent returned HTTP {status}"),
+            status.is_server_error(),
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use omdesky_protocol::ProtocolError;
-    use serde_json::Map;
 
     #[tokio::test]
     async fn test_parse_rejects_oversized_response_body() {
@@ -501,7 +475,6 @@ mod tests {
             "hostname": "host",
             "omarchy_version": "4.0.0",
             "agent_version": RELEASE,
-            "protocol_versions": [1],
             "capabilities": [],
         })
         .to_string()
@@ -613,7 +586,6 @@ mod tests {
             hostname: "x".repeat(MAX_NODE_FIELD_BYTES + 1),
             omarchy_version: "4.0.0".to_owned(),
             agent_version: "0.1.0".to_owned(),
-            protocol_versions: vec![1],
             capabilities: Vec::new(),
         };
 
@@ -629,7 +601,6 @@ mod tests {
             hostname: "host".to_owned(),
             omarchy_version: "4.0.0".to_owned(),
             agent_version: "0.1.0".to_owned(),
-            protocol_versions: vec![1],
             capabilities: vec!["capability".to_owned(); MAX_CAPABILITIES + 1],
         };
 
@@ -645,7 +616,6 @@ mod tests {
             hostname: "desk\u{1b}]8;;https://evil.example\u{7}top".to_owned(),
             omarchy_version: "4.0.0\u{202e}".to_owned(),
             agent_version: "0.1.1".to_owned(),
-            protocol_versions: vec![1],
             capabilities: vec!["desktop.input\u{1b}[2J".to_owned()],
         });
 
@@ -687,6 +657,29 @@ mod tests {
     }
 
     #[test]
+    fn test_http_error_preserves_every_known_wire_code() {
+        for code in omdesky_protocol::ErrorCode::ALL {
+            let error = http_error(
+                StatusCode::CONFLICT,
+                Some(ErrorEnvelope::new(*code, "detail")),
+            );
+
+            assert_eq!(error.code, code.as_str());
+            assert_eq!(error.retryable, code.retryable());
+        }
+    }
+
+    #[test]
+    fn test_http_error_reports_an_unknown_wire_code_as_a_failed_request() {
+        let mut envelope = ErrorEnvelope::new(omdesky_protocol::ErrorCode::Internal, "detail");
+        envelope.error.code = "FUTURE_ERROR".to_owned();
+
+        let error = http_error(StatusCode::CONFLICT, Some(envelope));
+
+        assert_eq!(error.code, "AGENT_REQUEST_FAILED");
+    }
+
+    #[test]
     fn test_http_error_keeps_public_message_user_friendly() {
         let error = http_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -695,7 +688,6 @@ mod tests {
                     code: "HYPRLAND_UNAVAILABLE".to_owned(),
                     message: "socket /run/user/1000/hypr/private is missing".to_owned(),
                     retryable: true,
-                    details: Map::new(),
                 },
             }),
         );

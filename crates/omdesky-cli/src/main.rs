@@ -31,7 +31,7 @@ use omdesky_platform::{
     sunshine::{SunshineAdapter, SunshineCredentialStore},
     tailscale::TailscaleAdapter,
 };
-use omdesky_protocol::{CommandRequest, SunshinePairRequest};
+use omdesky_protocol::CommandRequest;
 use serde_json::json;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use time::OffsetDateTime;
@@ -460,13 +460,7 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
         sunshine_credential_store()?,
     );
 
-    adapter
-        .submit_pairing_pin(SunshinePairRequest {
-            pairing_id: None,
-            pin: pin.to_owned(),
-            client_name: name.to_owned(),
-        })
-        .await?;
+    adapter.submit_pairing_pin(pin, name).await?;
 
     println!("Submitted PIN to local Sunshine; Moonlight should finish pairing");
 

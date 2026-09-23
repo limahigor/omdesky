@@ -10,7 +10,7 @@ use omdesky_core::{
     RemoteCommand, SessionEndpoint, SessionGrant, SessionRole, StreamProfile, WindowSelector,
     WorkspaceTarget,
 };
-use omdesky_protocol::{CommandRequest, PROTOCOL_V1, SunshinePairRequest};
+use omdesky_protocol::{CommandRequest, PROTOCOL, SunshinePairRequest};
 use serde::Serialize;
 use std::{future::Future, net::IpAddr, sync::Arc, time::Instant};
 
@@ -207,7 +207,7 @@ impl DiscoverNodes {
         };
         let probe_started = Instant::now();
         match self.agent.health(&endpoint).await {
-            Ok(health) if health.protocol == PROTOCOL_V1 => {
+            Ok(health) if health.protocol == PROTOCOL => {
                 let latency_ms = measured_latency_ms(probe_started.elapsed(), is_local);
                 let info = self.agent.node_info(&endpoint).await;
 
@@ -310,7 +310,7 @@ impl PairStream {
             .sunshine_pair(
                 endpoint,
                 SunshinePairRequest {
-                    pairing_id: Some(challenge.pairing_id),
+                    pairing_id: challenge.pairing_id,
                     pin: pending.pin,
                     client_name: self.client_name.clone(),
                 },

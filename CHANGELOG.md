@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The control protocol is version 2. Every command carries a required request identifier and timestamp, pairing requires its challenge identifier, and node information no longer lists protocol versions. A 0.1 controller now reports a 0.2 agent as incompatible instead of ready.
+- Agent errors use one fixed vocabulary of codes, each with its own HTTP status and retry hint, and a malformed request body is answered with the same error envelope. The controller keeps every known code instead of collapsing most of them into a generic failure.
+- Capability lists from another computer ignore values this version does not recognize.
+
 - **Breaking:** both computers must run the same release line, meaning the same major and minor version. Each side announces its release on every request and response and refuses a peer from another line, including 0.1.1, which announces none. A device from another line is listed as incompatible, and connecting to it fails with a clear message instead of a partial session. Upgrade both ends together.
 - A local agent left running from an earlier release is reported as such, instead of as a stopped agent, so restarting it after an upgrade is the obvious fix.
 - Devices whose agent is incompatible are listed without `--all-tailnet`, so an out-of-date computer is visible rather than missing.

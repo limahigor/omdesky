@@ -3,6 +3,7 @@ use omdesky_application::ports::{
     AgentEndpoint, PortResult, SessionKeybindConfig, SessionKeybindInstaller,
 };
 use omdesky_core::{SessionClaim, SessionGrant, SessionId, SessionRole, WindowSelector};
+use omdesky_protocol::ErrorCode;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
@@ -43,12 +44,12 @@ pub enum SessionError {
 }
 
 impl SessionError {
-    pub fn code(self) -> &'static str {
+    pub fn code(self) -> ErrorCode {
         match self {
-            SessionError::OwnedByAnotherController => "SESSION_ALREADY_OWNED",
-            SessionError::NotOwner => "SESSION_NOT_OWNED",
-            SessionError::NotFound => "SESSION_NOT_FOUND",
-            SessionError::EffectsFailed => "SESSION_EFFECTS_FAILED",
+            SessionError::OwnedByAnotherController => ErrorCode::SessionAlreadyOwned,
+            SessionError::NotOwner => ErrorCode::SessionNotOwned,
+            SessionError::NotFound => ErrorCode::SessionNotFound,
+            SessionError::EffectsFailed => ErrorCode::SessionEffectsFailed,
         }
     }
 

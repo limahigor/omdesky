@@ -93,7 +93,6 @@ async fn main() -> Result<()> {
         hostname: env::var("HOSTNAME").unwrap_or_else(|_| "omarchy".to_owned()),
         omarchy_version: format!("{}.{}.{}", omarchy.major, omarchy.minor, omarchy.patch),
         agent_version: omdesky_protocol::RELEASE.to_owned(),
-        protocol_versions: vec![1],
         capabilities: vec![
             "omarchy.node".to_owned(),
             "desktop.stream-host".to_owned(),
