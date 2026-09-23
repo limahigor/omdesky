@@ -13,10 +13,11 @@ use omdesky_application::{
     },
     readiness::ensure_controller_ready,
     services::{ConnectNode, ConnectRequest, PairStream},
+    target::{PeerLookupError, display_name, find_peer},
 };
 use omdesky_core::{
-    CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, NodeId,
-    NodeStatus, RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget,
+    CodecPreference, ControlCapability, DisplayId, InputMode, KeyChord, KeyModifier, MeshPeer,
+    NodeId, NodeStatus, RemoteCommand, StreamProfile, WindowSelector, WorkspaceTarget,
     bitrate_kbps_from_mbps,
     text::{DISPLAY_NAME_LIMIT, sanitize_for_display},
 };
@@ -480,6 +481,9 @@ async fn sunshine_pin(pin: &str, name: &str) -> Result<()> {
 
 async fn connect(args: ConnectArgs) -> Result<()> {
     let config = Config::load()?;
+
+    let endpoint = resolve_endpoint(&args.target).await?;
+
     let client = agent_client();
     let controller_endpoint = local_agent_endpoint(config.network.agent_port)
         .await
@@ -490,7 +494,6 @@ async fn connect(args: ConnectArgs) -> Result<()> {
     let sunshine_configured = SunshineCredentialStore::default().configured().await?;
     ensure_controller_ready(local_agent, sunshine_configured)?;
 
-    let endpoint = resolve_endpoint(&args.target).await?;
     let notifications = Arc::new(OmarchyNotificationAdapter::default());
     let callback_access = CallbackAccess::new(
         Arc::new(TailscaleAdapter::new(Arc::new(TokioCommandRunner))),
@@ -945,15 +948,10 @@ fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>> {
         .collect()
 }
 
-async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
+async fn resolve_peer(target: &str) -> Result<MeshPeer> {
     let config = Config::load()?;
-    let port = config.network.agent_port;
 
-    if let Ok(address) = target.parse::<IpAddr>() {
-        return Ok(AgentEndpoint { address, port });
-    }
-
-    let resolved = config
+    let name = config
         .devices
         .get(target)
         .and_then(|device| device.alias.clone())
@@ -962,45 +960,41 @@ async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
     let peers = TailscaleAdapter::new(Arc::new(TokioCommandRunner))
         .peers()
         .await?;
-    let address = peers
-        .into_iter()
-        .find(|peer| {
-            peer.online
-                && (peer.hostname.as_deref() == Some(resolved.as_str())
-                    || peer.tailnet_node_id == resolved
-                    || peer
-                        .dns_name
-                        .as_deref()
-                        .is_some_and(|dns| dns.trim_end_matches('.').starts_with(&resolved)))
-        })
-        .and_then(|peer| {
-            peer.ips
-                .iter()
-                .find(|address| address.is_ipv4())
-                .or(peer.ips.first())
-                .copied()
-        })
-        .with_context(|| format!("no online Tailnet peer matches '{target}'"))?;
+
+    match find_peer(&peers, &name) {
+        Ok(peer) => Ok(peer.clone()),
+        Err(PeerLookupError::NotFound) => anyhow::bail!(
+            "no Tailscale device is named '{name}'; use a name or address shown by `omdesky devices --all-tailnet`"
+        ),
+        Err(PeerLookupError::Ambiguous(candidates)) => anyhow::bail!(
+            "'{name}' matches several Tailscale devices ({}); use one of those names or an address",
+            candidates.join(", ")
+        ),
+    }
+}
+
+async fn resolve_endpoint(target: &str) -> Result<AgentEndpoint> {
+    let port = Config::load()?.network.agent_port;
+
+    let peer = resolve_peer(target).await?;
+
+    if !peer.online {
+        anyhow::bail!("{} is offline in Tailscale", display_name(&peer));
+    }
+
+    let address = peer
+        .ips
+        .iter()
+        .find(|address| address.is_ipv4())
+        .or(peer.ips.first())
+        .copied()
+        .with_context(|| format!("{} has no Tailscale address", display_name(&peer)))?;
 
     Ok(AgentEndpoint { address, port })
 }
 
 async fn resolve_tailnet_identity(target: &str) -> Result<String> {
-    if let Ok(address) = target.parse::<IpAddr>() {
-        return TailscaleAdapter::new(Arc::new(TokioCommandRunner))
-            .identify_source(address)
-            .await?
-            .map(|identity| identity.tailnet_node_id)
-            .context("target is not a visible Tailscale identity");
-    }
-
-    TailscaleAdapter::new(Arc::new(TokioCommandRunner))
-        .peers()
-        .await?
-        .into_iter()
-        .find(|peer| peer.hostname.as_deref() == Some(target) || peer.tailnet_node_id == target)
-        .map(|peer| peer.tailnet_node_id)
-        .with_context(|| format!("no Tailnet peer matches '{target}'"))
+    Ok(resolve_peer(target).await?.tailnet_node_id)
 }
 
 fn read_session() -> Option<SessionRecord> {

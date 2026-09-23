@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A command-line target must name a device exactly. A prefix of a MagicDNS name used to select a device, so `omdesky connect hop` connected to `hoppe` and a short name could pick the wrong one of two similar devices. Two devices sharing a name are now reported with their MagicDNS names, an offline device is reported as offline, an address must belong to a Tailnet device, and `connect`, the inspection commands and `access allow` all resolve targets the same way.
+
 - Release builds log. The agent writes structured events to the journal at `info` by default, the command-line tool logs to standard error when `RUST_LOG` is set, and both honor `RUST_LOG`.
 - `omdesky-agent --version` and `--help` print instead of starting the agent, and unknown arguments are refused.
 - `omdesky doctor` also checks that the local agent runs the same release and protocol, that the user service runs the binary from the same installation, that the allowlist grants something, and which devices are blocked and how to fix them. It exits with a non-zero status when a check fails.

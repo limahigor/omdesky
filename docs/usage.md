@@ -123,7 +123,7 @@ Add `--json` when you need structured output for a script. Every JSON document i
 
 In `devices`, each entry carries `status` and a `blockers` list. Every blocker has a `code` (`incompatible`, `denied` or `needs_access`), the `side` that has to change (`local` or `remote`), and a `fix` with the command or action to take on that side; `fix` never names the computer, `side` does.
 
-A target can be a visible Tailscale hostname, Tailnet IP address, stable Tailscale node ID, or a device name from your Omdesky configuration.
+A target is the name Tailscale shows for the device (such as `hoppe` or `"POCO X3 Pro"`, in any letter case), its MagicDNS name (`poco-x3-pro` or `hoppe.tail1234.ts.net`), its stable Tailscale node ID, one of its Tailnet IP addresses, or a device name from your Omdesky configuration. The name must match exactly: a prefix such as `hop` never selects `hoppe`. When two devices share a name, the command lists their MagicDNS names so you can pick one, and an offline device is reported as offline rather than unknown. `omdesky access allow` resolves names the same way.
 
 ## End a command-line session
 
