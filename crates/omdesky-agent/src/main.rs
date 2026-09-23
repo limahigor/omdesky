@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         node_id: identity.node_id.to_string(),
         hostname: env::var("HOSTNAME").unwrap_or_else(|_| "omarchy".to_owned()),
         omarchy_version: format!("{}.{}.{}", omarchy.major, omarchy.minor, omarchy.patch),
-        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agent_version: omdesky_protocol::RELEASE.to_owned(),
         protocol_versions: vec![1],
         capabilities: vec![
             "omarchy.node".to_owned(),

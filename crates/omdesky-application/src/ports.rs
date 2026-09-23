@@ -85,6 +85,12 @@ impl PortError {
             "REMOTE_AGENT_UNAVAILABLE" => {
                 "The remote Omdesky agent stopped responding. The stream was closed."
             }
+            "VERSION_INCOMPATIBLE" => {
+                "The other device runs a different Omdesky release. Install the same version on both computers."
+            }
+            "LOCAL_AGENT_INCOMPATIBLE" => {
+                "The local Omdesky agent runs a different release. Restart omdesky-agent after upgrading."
+            }
             "LOCAL_SUNSHINE_UNCONFIGURED" => {
                 "Sunshine is not configured on this device. Run `omdesky setup` and try again."
             }

@@ -6,8 +6,9 @@ use omdesky_core::{
 };
 use omdesky_protocol::{
     ActiveWindowResponse, CommandRequest, CommandResponse, DisplaysResponse, ErrorEnvelope,
-    FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, SunshinePairChallengeResponse,
-    SunshinePairRequest, SunshineStatusResponse, WindowsResponse, WorkspacesResponse,
+    FocusWorkspaceRequest, HealthResponse, NodeInfoResponse, RELEASE, RELEASE_HEADER,
+    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse, WindowsResponse,
+    WorkspacesResponse, is_compatible_release,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -80,15 +81,18 @@ impl HttpAgentClient {
         path: &str,
         timeout: Duration,
     ) -> PortResult<T> {
-        Self::parse(
-            self.client
-                .get(Self::url(endpoint, path))
-                .timeout(timeout)
-                .send()
-                .await
-                .map_err(network_error)?,
-        )
-        .await
+        let response = self
+            .client
+            .get(Self::url(endpoint, path))
+            .header(RELEASE_HEADER, RELEASE)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(network_error)?;
+
+        verify_release(&response)?;
+
+        Self::parse(response).await
     }
 
     async fn post_json<B: serde::Serialize, T: DeserializeOwned>(
@@ -97,23 +101,43 @@ impl HttpAgentClient {
         path: &str,
         body: &B,
     ) -> PortResult<T> {
-        Self::parse(
-            self.client
-                .post(Self::url(endpoint, path))
-                .timeout(REQUEST_TIMEOUT)
-                .json(body)
-                .send()
-                .await
-                .map_err(network_error)?,
-        )
-        .await
+        let response = self
+            .client
+            .post(Self::url(endpoint, path))
+            .header(RELEASE_HEADER, RELEASE)
+            .timeout(REQUEST_TIMEOUT)
+            .json(body)
+            .send()
+            .await
+            .map_err(network_error)?;
+
+        verify_release(&response)?;
+
+        Self::parse(response).await
     }
 }
 
 #[async_trait]
 impl AgentClient for HttpAgentClient {
     async fn health(&self, endpoint: &AgentEndpoint) -> PortResult<HealthResponse> {
-        self.get(endpoint, "/v1/health", PROBE_TIMEOUT).await
+        let response = self
+            .client
+            .get(Self::url(endpoint, "/v1/health"))
+            .header(RELEASE_HEADER, RELEASE)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(network_error)?;
+
+        let health: HealthResponse = Self::parse(response).await?;
+
+        if health.agent_version.len() > MAX_VERSION_BYTES
+            || !is_compatible_release(&health.agent_version)
+        {
+            return Err(release_mismatch(Some(&health.agent_version)));
+        }
+
+        Ok(health)
     }
 
     async fn node_info(&self, endpoint: &AgentEndpoint) -> PortResult<NodeInfoResponse> {
@@ -289,6 +313,31 @@ fn validate_node_info(response: NodeInfoResponse) -> PortResult<NodeInfoResponse
     Ok(sanitize_node_info(response))
 }
 
+fn verify_release(response: &reqwest::Response) -> PortResult<()> {
+    let release = response
+        .headers()
+        .get(RELEASE_HEADER)
+        .and_then(|value| value.to_str().ok());
+
+    match release {
+        Some(release) if is_compatible_release(release) => Ok(()),
+        release => Err(release_mismatch(release)),
+    }
+}
+
+fn release_mismatch(remote: Option<&str>) -> PortError {
+    let remote = remote.map_or_else(
+        || "an earlier release".to_owned(),
+        |release| sanitize_for_display(release, DISPLAY_NAME_LIMIT),
+    );
+
+    PortError::new(
+        "VERSION_INCOMPATIBLE",
+        format!("the device runs Omdesky {remote} and this computer runs {RELEASE}"),
+        false,
+    )
+}
+
 fn network_error(error: reqwest::Error) -> PortError {
     tracing::debug!(
         detail = %error,
@@ -327,6 +376,7 @@ fn http_error(status: StatusCode, envelope: Option<ErrorEnvelope>) -> PortError 
                 "SUNSHINE_API_UNAVAILABLE" => "SUNSHINE_API_UNAVAILABLE",
                 "SUNSHINE_PAIRING_FAILED" => "SUNSHINE_PAIRING_FAILED",
                 "INVALID_COMMAND" => "INVALID_COMMAND",
+                "VERSION_INCOMPATIBLE" => "VERSION_INCOMPATIBLE",
                 _ => "AGENT_REQUEST_FAILED",
             };
 
@@ -375,6 +425,140 @@ mod tests {
         server.await.expect("server exits");
 
         assert_eq!(error.code, "AGENT_RESPONSE_LIMIT");
+    }
+
+    async fn serve_once(
+        release: Option<String>,
+        body: String,
+    ) -> (AgentEndpoint, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener address");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("connection accepted");
+
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.expect("request read");
+
+            let release_line = release
+                .map(|release| format!("{RELEASE_HEADER}: {release}\r\n"))
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{release_line}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response written");
+
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+
+        let endpoint = AgentEndpoint {
+            address: address.ip(),
+            port: address.port(),
+        };
+
+        (endpoint, server)
+    }
+
+    fn node_body() -> String {
+        serde_json::json!({
+            "node_id": "node",
+            "hostname": "host",
+            "omarchy_version": "4.0.0",
+            "agent_version": RELEASE,
+            "protocol_versions": [1],
+            "capabilities": [],
+        })
+        .to_string()
+    }
+
+    fn health_body(agent_version: &str) -> String {
+        serde_json::json!({
+            "status": "ok",
+            "protocol": 1,
+            "agent_version": agent_version,
+        })
+        .to_string()
+    }
+
+    fn other_minor_release() -> String {
+        let current = omdesky_protocol::ReleaseLine::current().expect("current release parses");
+
+        format!("{}.{}.0", current.major, current.minor + 1)
+    }
+
+    #[tokio::test]
+    async fn test_requests_announce_the_controller_release() {
+        let (endpoint, server) = serve_once(Some(RELEASE.to_owned()), node_body()).await;
+
+        HttpAgentClient::new()
+            .node_info(&endpoint)
+            .await
+            .expect("a matching release is accepted");
+
+        let request = server.await.expect("server exits").to_ascii_lowercase();
+
+        assert!(request.contains(&format!("{RELEASE_HEADER}: {RELEASE}")));
+    }
+
+    #[tokio::test]
+    async fn test_an_agent_without_a_release_header_is_incompatible() {
+        let (endpoint, server) = serve_once(None, node_body()).await;
+
+        let error = HttpAgentClient::new()
+            .node_info(&endpoint)
+            .await
+            .expect_err("an earlier agent is refused");
+        server.await.expect("server exits");
+
+        assert_eq!(error.code, "VERSION_INCOMPATIBLE");
+    }
+
+    #[tokio::test]
+    async fn test_an_agent_from_another_release_line_is_incompatible() {
+        let (endpoint, server) = serve_once(Some(other_minor_release()), node_body()).await;
+
+        let error = HttpAgentClient::new()
+            .node_info(&endpoint)
+            .await
+            .expect_err("another release line is refused");
+        server.await.expect("server exits");
+
+        assert_eq!(error.code, "VERSION_INCOMPATIBLE");
+    }
+
+    #[tokio::test]
+    async fn test_health_rejects_an_agent_from_another_release_line() {
+        let (endpoint, server) = serve_once(None, health_body(&other_minor_release())).await;
+
+        let error = HttpAgentClient::new()
+            .health(&endpoint)
+            .await
+            .expect_err("another release line is refused");
+        server.await.expect("server exits");
+
+        assert_eq!(error.code, "VERSION_INCOMPATIBLE");
+    }
+
+    #[tokio::test]
+    async fn test_health_accepts_an_agent_from_the_same_release_line() {
+        let (endpoint, server) = serve_once(None, health_body(RELEASE)).await;
+
+        let health = HttpAgentClient::new()
+            .health(&endpoint)
+            .await
+            .expect("the same release line is accepted");
+        server.await.expect("server exits");
+
+        assert_eq!(health.agent_version, RELEASE);
     }
 
     #[test]

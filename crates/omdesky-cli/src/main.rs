@@ -482,9 +482,9 @@ async fn connect(args: ConnectArgs) -> Result<()> {
         .map_err(|error| {
             anyhow::anyhow!("could not resolve this controller's Tailscale endpoint: {error}")
         })?;
-    let local_agent_available = client.health(&controller_endpoint).await.is_ok();
+    let local_agent = client.health(&controller_endpoint).await.map(drop);
     let sunshine_configured = sunshine_credential_store()?.configured().await?;
-    ensure_controller_ready(local_agent_available, sunshine_configured)?;
+    ensure_controller_ready(local_agent, sunshine_configured)?;
 
     let endpoint = resolve_endpoint(&args.target).await?;
     let notifications = Arc::new(OmarchyNotificationAdapter::default());

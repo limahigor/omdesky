@@ -7,8 +7,9 @@ pub mod session;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
+    http::{HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -28,8 +29,9 @@ use omdesky_platform::display::{
 use omdesky_protocol::{
     ActiveWindowResponse, CapabilitiesResponse, CommandRequest, CommandResponse, DisplaysResponse,
     ErrorEnvelope, FocusResponse, FocusWorkspaceRequest, HealthResponse, NodeInfoResponse,
-    PROTOCOL_V1, ProtocolError, SunshinePairChallengeResponse, SunshinePairRequest,
-    SunshinePairResponse, SunshineStatusResponse, WindowsResponse, WorkspacesResponse,
+    PROTOCOL_V1, ProtocolError, RELEASE, RELEASE_HEADER, SunshinePairChallengeResponse,
+    SunshinePairRequest, SunshinePairResponse, SunshineStatusResponse, WindowsResponse,
+    WorkspacesResponse, is_compatible_release,
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -139,8 +141,7 @@ impl FollowFocusSupervisor {
 }
 
 pub fn router(state: AgentState) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
+    let controlled = Router::new()
         .route("/v1/node", get(node))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/displays", get(displays))
@@ -153,15 +154,52 @@ pub fn router(state: AgentState) -> Router {
         .route("/v1/sunshine", get(sunshine_status))
         .route("/v1/sunshine/pair/challenge", post(sunshine_pair_challenge))
         .route("/v1/sunshine/pair", post(sunshine_pair))
+        .route_layer(middleware::from_fn(require_compatible_release));
+
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(controlled)
+        .layer(middleware::map_response(advertise_release))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
+}
+
+async fn require_compatible_release(request: Request, next: Next) -> Response {
+    let compatible = request
+        .headers()
+        .get(RELEASE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_compatible_release);
+
+    if !compatible {
+        tracing::debug!(path = %request.uri().path(), "request.release_incompatible");
+
+        return ApiError::new(
+            StatusCode::CONFLICT,
+            "VERSION_INCOMPATIBLE",
+            format!("this device runs Omdesky {RELEASE}; both computers must run the same release"),
+            false,
+        )
+        .into_response();
+    }
+
+    next.run(request).await
+}
+
+async fn advertise_release(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static(RELEASE_HEADER),
+        HeaderValue::from_static(RELEASE),
+    );
+
+    response
 }
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_owned(),
         protocol: PROTOCOL_V1,
-        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agent_version: RELEASE.to_owned(),
     })
 }
 

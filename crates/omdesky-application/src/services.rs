@@ -147,7 +147,11 @@ impl DiscoverNodes {
                     is_local,
                 })
             }
-            Ok(_) if include_all => Some(generic_node(
+            Ok(_)
+            | Err(PortError {
+                code: "VERSION_INCOMPATIBLE",
+                ..
+            }) => Some(generic_node(
                 peer,
                 name,
                 address,
@@ -693,15 +697,25 @@ where
 }
 
 pub fn ensure_controller_ready(
-    local_agent_available: bool,
+    local_agent: PortResult<()>,
     sunshine_configured: bool,
 ) -> PortResult<()> {
-    if !local_agent_available {
-        return Err(PortError::new(
-            "LOCAL_AGENT_UNAVAILABLE",
-            "the local omdesky-agent is not running",
-            true,
-        ));
+    match local_agent {
+        Ok(()) => {}
+        Err(error) if error.code == "VERSION_INCOMPATIBLE" => {
+            return Err(PortError::new(
+                "LOCAL_AGENT_INCOMPATIBLE",
+                error.message,
+                false,
+            ));
+        }
+        Err(_) => {
+            return Err(PortError::new(
+                "LOCAL_AGENT_UNAVAILABLE",
+                "the local omdesky-agent is not running",
+                true,
+            ));
+        }
     }
 
     if !sunshine_configured {
@@ -821,21 +835,43 @@ mod tests {
 
     #[test]
     fn test_ensure_controller_ready_rejects_inactive_local_agent() {
-        let error = ensure_controller_ready(false, true).expect_err("inactive agent is rejected");
+        let local_agent = Err(PortError::new(
+            "AGENT_UNREACHABLE",
+            "connection refused",
+            true,
+        ));
+
+        let error =
+            ensure_controller_ready(local_agent, true).expect_err("inactive agent is rejected");
 
         assert_eq!(error.code, "LOCAL_AGENT_UNAVAILABLE");
     }
 
     #[test]
+    fn test_ensure_controller_ready_rejects_local_agent_from_another_release() {
+        let local_agent = Err(PortError::new(
+            "VERSION_INCOMPATIBLE",
+            "the device runs Omdesky 0.1.1",
+            false,
+        ));
+
+        let error = ensure_controller_ready(local_agent, true)
+            .expect_err("an agent from another release is rejected");
+
+        assert_eq!(error.code, "LOCAL_AGENT_INCOMPATIBLE");
+        assert!(!error.retryable);
+    }
+
+    #[test]
     fn test_ensure_controller_ready_rejects_missing_sunshine_configuration() {
-        let error = ensure_controller_ready(true, false).expect_err("missing setup is rejected");
+        let error = ensure_controller_ready(Ok(()), false).expect_err("missing setup is rejected");
 
         assert_eq!(error.code, "LOCAL_SUNSHINE_UNCONFIGURED");
     }
 
     #[test]
     fn test_ensure_controller_ready_accepts_configured_controller() {
-        assert!(ensure_controller_ready(true, true).is_ok());
+        assert!(ensure_controller_ready(Ok(()), true).is_ok());
     }
 
     #[test]

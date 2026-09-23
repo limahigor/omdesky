@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod release;
+
+pub use release::{RELEASE, RELEASE_HEADER, ReleaseLine, is_compatible_release};
+
 use omdesky_core::{
     ControlCapability, Display, RemoteCommand, SessionClaim, SessionGrant, Window, Workspace,
     WorkspaceTarget,

@@ -22,8 +22,9 @@ use omdesky_core::{
     SessionRole, Window, WindowSelector, Workspace, WorkspaceTarget,
 };
 use omdesky_protocol::{
-    ActiveWindowResponse, CommandRequest, CommandResponse, HealthResponse, NodeInfoResponse,
-    SunshinePairChallengeResponse, SunshinePairRequest, SunshineStatusResponse,
+    ActiveWindowResponse, CommandRequest, CommandResponse, ErrorEnvelope, HealthResponse,
+    NodeInfoResponse, RELEASE, RELEASE_HEADER, ReleaseLine, SunshinePairChallengeResponse,
+    SunshinePairRequest, SunshineStatusResponse,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -326,6 +327,7 @@ async fn call(
 fn get(path: &str) -> Request<Body> {
     Request::builder()
         .uri(path)
+        .header(RELEASE_HEADER, RELEASE)
         .body(Body::empty())
         .expect("valid request")
 }
@@ -334,6 +336,7 @@ fn post_json<T: serde::Serialize>(path: &str, body: &T) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(path)
+        .header(RELEASE_HEADER, RELEASE)
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(body).expect("serializable body"),
@@ -378,6 +381,102 @@ async fn test_health_stays_reachable_without_authorization() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(decode::<HealthResponse>(&body).protocol, 1);
+}
+
+fn get_with_release(path: &str, release: Option<&str>) -> Request<Body> {
+    let builder = Request::builder().uri(path);
+
+    let builder = match release {
+        Some(release) => builder.header(RELEASE_HEADER, release),
+        None => builder,
+    };
+
+    builder.body(Body::empty()).expect("valid request")
+}
+
+fn other_minor_release() -> String {
+    let current = ReleaseLine::current().expect("current release parses");
+
+    format!("{}.{}.0", current.major, current.minor + 1)
+}
+
+async fn call_with_headers(
+    state: &AgentState,
+    source: SocketAddr,
+    request: Request<Body>,
+) -> (StatusCode, Option<String>) {
+    let mut request = request;
+    request.extensions_mut().insert(ConnectInfo(source));
+
+    let response = router(state.clone())
+        .oneshot(request)
+        .await
+        .expect("the router responds");
+
+    let release = response
+        .headers()
+        .get(RELEASE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    (response.status(), release)
+}
+
+#[tokio::test]
+async fn test_health_answers_a_controller_of_any_release() {
+    let state = state(Vec::new());
+
+    let (status, release) =
+        call_with_headers(&state, peer_source(), get_with_release("/v1/health", None)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(release.as_deref(), Some(RELEASE));
+}
+
+#[tokio::test]
+async fn test_a_controller_without_a_release_is_refused_before_authorization() {
+    let state = state(vec![entry(PEER, &ControlCapability::ALL)]);
+
+    let (status, body) = call(&state, peer_source(), get_with_release("/v1/node", None)).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        decode::<ErrorEnvelope>(&body).error.code,
+        "VERSION_INCOMPATIBLE"
+    );
+}
+
+#[tokio::test]
+async fn test_a_controller_from_another_release_line_is_refused() {
+    let state = state(vec![entry(PEER, &ControlCapability::ALL)]);
+
+    let other = other_minor_release();
+
+    for release in [other.as_str(), "999.0.0", "not-a-version"] {
+        let (status, _) = call(
+            &state,
+            peer_source(),
+            get_with_release("/v1/node", Some(release)),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{release} must be refused");
+    }
+}
+
+#[tokio::test]
+async fn test_every_response_advertises_the_agent_release() {
+    let state = state(Vec::new());
+
+    let (refused, refused_release) =
+        call_with_headers(&state, peer_source(), get_with_release("/v1/node", None)).await;
+    let (unauthorized, unauthorized_release) =
+        call_with_headers(&state, peer_source(), get("/v1/node")).await;
+
+    assert_eq!(refused, StatusCode::CONFLICT);
+    assert_eq!(refused_release.as_deref(), Some(RELEASE));
+    assert_eq!(unauthorized, StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized_release.as_deref(), Some(RELEASE));
 }
 
 #[tokio::test]

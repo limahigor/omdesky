@@ -367,12 +367,16 @@ fn start_local_readiness(
 ) {
     tokio::spawn(async move {
         let endpoint = local_agent_endpoint(agent_port).await;
-        let agent_available = match endpoint {
-            Ok(endpoint) => agent.health(&endpoint).await.is_ok(),
-            Err(_) => false,
+        let local_agent = match endpoint {
+            Ok(endpoint) => agent.health(&endpoint).await.map(drop),
+            Err(error) => Err(PortError::new(
+                "LOCAL_AGENT_UNAVAILABLE",
+                error.to_string(),
+                true,
+            )),
         };
         let sunshine_configured = credentials.configured().await.unwrap_or(false);
-        let result = ensure_controller_ready(agent_available, sunshine_configured)
+        let result = ensure_controller_ready(local_agent, sunshine_configured)
             .map_err(|error| error.user_message().to_owned());
 
         let _ = sender.send(AsyncMessage::LocalReadiness(result)).await;
@@ -417,9 +421,9 @@ fn start_connect(
                 return;
             }
         };
-        let local_agent_available = agent.health(&controller_endpoint).await.is_ok();
+        let local_agent = agent.health(&controller_endpoint).await.map(drop);
         let sunshine_configured = credentials.configured().await.unwrap_or(false);
-        if let Err(error) = ensure_controller_ready(local_agent_available, sunshine_configured) {
+        if let Err(error) = ensure_controller_ready(local_agent, sunshine_configured) {
             let result = Err(user_error("The connection could not be completed.", &error));
             let _ = sender
                 .send(AsyncMessage::SessionEnded {
